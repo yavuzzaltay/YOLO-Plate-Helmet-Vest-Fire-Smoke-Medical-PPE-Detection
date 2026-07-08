@@ -629,13 +629,23 @@ def enhance_plate_for_ocr(plate_crop):
     Returns:
         enhanced (np.ndarray): İyileştirilmiş görüntü
     """
-    # ─── 1. BÜYÜTME (4x) ───
-    # INTER_CUBIC: bikübik interpolasyon
-    # - 4x4 piksel komşuluk kullanır (INTER_LINEAR sadece 2x2 kullanır)
-    # - Daha yavaş ama daha kaliteli büyütme
-    # - Kenarlar daha pürüzsüz, pikselleşme az
-    # fx=4, fy=4: her iki eksende 4 kat büyüt
-    plate_large = cv2.resize(plate_crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    # ─── 1. BÜYÜTME (ADAPTİF ÖLÇEK) ───  [DEĞİŞTİ]
+    # ESKİ: sabit 4x büyütme
+    #   - 30px'lik kırpım → 120px (yeterli) ama 150px'lik kırpım → 600px
+    #   - Aşırı büyütme JPEG artefaktlarını da büyütür + işlemi yavaşlatır
+    # YENİ: hedef yüksekliğe göre ölçek hesapla
+    #   - Hedef: ~160px plaka yüksekliği → karakter yüksekliği ~90-110px
+    #     (EasyOCR'ın CRAFT dedektörü için ideal aralık)
+    #   - Zaten büyük kırpımlar gereksiz yere şişirilmez
+    # INTER_LANCZOS4: 8x8 komşuluk kullanan en kaliteli interpolasyon
+    #   - INTER_CUBIC'ten (4x4) daha keskin kenar üretir
+    #   - Küçük plakaların büyütülmesinde karakter netliği kritik
+    TARGET_PLATE_HEIGHT = 160
+    h0 = plate_crop.shape[0]
+    scale = TARGET_PLATE_HEIGHT / max(h0, 1)
+    scale = min(max(scale, 1.0), 8.0)  # 1x-8x aralığına sınırla
+    plate_large = cv2.resize(plate_crop, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_LANCZOS4)
     
     # ─── 2. CLAHE (Contrast Limited Adaptive Histogram Equalization) ───
     # Normal histogram eşitleme vs CLAHE:
@@ -697,7 +707,16 @@ def enhance_plate_for_ocr(plate_crop):
     #   0: ek sabit (brightness offset)
     gaussian = cv2.GaussianBlur(plate_smooth, (0, 0), 3.0)
     enhanced = cv2.addWeighted(plate_smooth, 1.5, gaussian, -0.5, 0)
-    
+
+    # ─── 5. KENAR PAYI EKLEME ───  [YENİ]
+    # EasyOCR'ın metin dedektörü (CRAFT), görüntü kenarına dayanan
+    # karakterleri kaçırabiliyor veya kısmen algılıyor.
+    # Görüntünün etrafına 16px'lik kenar payı ekleyerek ilk ve son
+    # karakterin de tam algılanmasını garantiliyoruz.
+    # BORDER_REPLICATE: kenar piksellerini kopyalar (yapay kontrast
+    # çizgisi oluşturmaz — sabit renk dolgu sahte kenar üretebilirdi)
+    enhanced = cv2.copyMakeBorder(enhanced, 16, 16, 16, 16, cv2.BORDER_REPLICATE)
+
     return enhanced
 
 
@@ -795,247 +814,969 @@ def adaptive_binarize(plate_image):
 # BÖLÜM 7: OCR İLE PLAKA OKUMA
 # =============================================================================
 
-def read_plate_ocr(plate_image, reader):
+def _join_fragments(fragments):
+    """Parça listesini soldan sağa birleştir, uzunluk-ağırlıklı güven hesapla."""
+    if not fragments:
+        return "", 0.0
+    fragments = sorted(fragments, key=lambda f: f['x'])
+    text = "".join(f['text'] for f in fragments)
+    total_len = sum(len(f['text']) for f in fragments)
+    # Uzunluk-ağırlıklı güven: uzun parçalar sonucu daha çok belirler
+    # (basit ortalama, 1 karakterlik sahte parçaya 6 karakterlik gerçek
+    #  parçayla eşit ağırlık veriyordu)
+    conf = sum(f['conf'] * len(f['text']) for f in fragments) / total_len
+    return text, conf
+
+
+def merge_ocr_fragments(ocr_result):
     """
-    Temizlenmiş ve iyileştirilmiş plaka görüntüsünden metin okur.
-    Birden fazla OCR stratejisi dener ve en iyi sonucu seçer.
-    
-    ÇOK STRATEJİLİ YAKLAŞIM — Neden?
-    Tek bir OCR çağrısı her zaman en iyi sonucu vermez çünkü:
-    - Renkli görüntüde iyi okunan bazı karakterler binarize'da kaybolabilir
-    - Binarize'da netleşen bazı karakterler renkli'de gürültüye karışabilir
-    - Bu yüzden hem renkli hem de binarize versiyonu deneriz
-    
-    ALLOWLIST MANTIĞI:
-    Türk plakalarında kullanılan karakterler sınırlıdır:
-    - Rakamlar: 0-9
-    - Harfler: A B C D E F G H I J K L M N O P R S T U V Y Z
-    - Türk plakalarında Q, W, X harfleri KULLANILMAZ
-    - allowlist ile OCR'ı bu karakterlere kısıtlarız → doğruluk artar
-    - Örn: 'Q' yerine 'O', 'W' yerine 'V' okunma hatası önlenir
-    
+    [YENİ FONKSİYON — OCR PARÇALARINI ÇOK HİPOTEZLİ BİRLEŞTİRME]
+
+    EasyOCR plakayı genelde 2-3 parça halinde okur: "06", "ABY", "325".
+    Ama araya sahte parçalar da karışır: plaka çerçevesi kenarı, vida,
+    TR bandı yazısı, plaka yanındaki galeri sticker'ı...
+
+    Hangi parçanın sahte olduğunu tek bir kuralla bilemeyiz — bu yüzden
+    FARKLI FİLTRE KOMBİNASYONLARIYLA BİRDEN FAZLA HİPOTEZ üretilir ve
+    hepsi aday olarak skorlamaya gönderilir. Yapısal plaka doğrulaması
+    hangisinin doğru olduğuna karar verir.
+
+    HİPOTEZLER:
+    1. "yükseklik filtreli": ana metin yüksekliğinin %45'inden kısa
+       parçalar atılır (çerçeve kenarı '1' artefaktını çözer — plaka
+       karakterleri hep aynı yüksekliktedir)
+    2. "yükseklik + güven filtreli": ek olarak güveni 0.30'un altındaki
+       parçalar atılır. GERÇEK HATA ÖRNEĞİ: gevşek kırpımda galeri
+       sticker'ından 'EN' parçası (güven 0.16) plakaya karışıp
+       '42ALDEN013' üretiyordu; gerçek parçalar ('42'=0.74, 'ALD'=1.00,
+       '013'=0.65) güven filtresiyle ayrışır → '42ALD013' GEÇERLİ!
+    3. "filtresiz": tüm parçalar — yükseklik filtresi yanlışlıkla
+       gerçek parça attıysa telafi eder
+
     Parametreler:
-        plate_image (np.ndarray): İyileştirilmiş plaka görüntüsü
-        reader: EasyOCR Reader nesnesi
-    
+        ocr_result: EasyOCR readtext çıktısı [(bbox, text, conf), ...]
+
     Returns:
-        best_text (str): Okunan plaka metni (veya None)
-        best_confidence (float): Güven oranı (0.0-1.0)
+        hypotheses (list): [(text, conf, hipotez_adı), ...] — tekrarsız
     """
-    # Türk plakalarında kullanılabilecek tüm karakterler
+    if not ocr_result:
+        return []
+
+    fragments = []
+    for bbox, text, conf in ocr_result:
+        text = text.replace(" ", "")
+        if not text:
+            continue
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        fragments.append({
+            'x': min(xs),                  # Soldan sıralama için
+            'h': max(ys) - min(ys),        # Parça yüksekliği (filtre için)
+            'text': text,
+            'conf': conf,
+        })
+
+    if not fragments:
+        return []
+
+    max_h = max(f['h'] for f in fragments)
+    tall = [f for f in fragments if f['h'] >= 0.45 * max_h]
+    tall_confident = [f for f in tall if f['conf'] >= 0.30]
+
+    hypotheses = []
+    seen_texts = set()
+    for frag_set, label in ((tall, ""),                # Ana hipotez
+                            (tall_confident, "+güven"),  # Güven filtreli
+                            (fragments, "+tümü")):       # Filtresiz
+        text, conf = _join_fragments(frag_set)
+        # En az 4 karakter olsun ve aynı metin tekrar aday olmasın
+        if len(text) >= 4 and text not in seen_texts:
+            seen_texts.add(text)
+            hypotheses.append((text, conf, label))
+
+    return hypotheses
+
+
+def _character_vote(scored_candidates):
+    """
+    [YENİ YARDIMCI — KARAKTER SEVİYESİNDE OYLAMA (ENSEMBLE)]
+
+    Farklı stratejiler aynı plakayı çoğunlukla 1 karakter farkla okur:
+    strateji A: "06HBY325" (güven 0.81)  ← H hatalı
+    strateji B: "06ABY325" (güven 0.51)  ← doğru
+    strateji C: "06ABY325" (güven 0.50)  ← doğru
+
+    Tek tek bakınca en güvenli aday A (hatalı!). Ama karakter bazında
+    güven-ağırlıklı oylama yapılırsa: pozisyon 2'de A=0.81'e karşı
+    A+B=1.01 → 'A' kazanır → "06ABY325" sentezlenir.
+
+    Sadece AYNI YAPIDA (aynı uzunluk + aynı harf/rakam deseni) geçerli
+    adaylar oylanır — farklı yapılar karıştırılmaz.
+
+    Parametreler:
+        scored_candidates: [(formatted, conf), ...] — geçerli adaylar
+
+    Returns:
+        (sentez_metin, grup_max_güven) veya (None, 0)
+    """
+    if len(scored_candidates) < 2:
+        return None, 0.0
+
+    # Yapı imzasına göre grupla: uzunluk + harf/rakam deseni
+    groups = {}
+    for formatted, conf in scored_candidates:
+        clean = formatted.replace(" ", "")
+        signature = (len(clean), tuple(c.isalpha() for c in clean))
+        groups.setdefault(signature, []).append((clean, conf))
+
+    # En çok üyeli (eşitlikte toplam güveni yüksek) grubu seç
+    best_group = max(groups.values(),
+                     key=lambda g: (len(g), sum(c for _, c in g)))
+    if len(best_group) < 2:
+        return None, 0.0
+
+    # Pozisyon pozisyon güven-ağırlıklı oylama
+    length = len(best_group[0][0])
+    synthesized = []
+    for pos in range(length):
+        votes = {}
+        for clean, conf in best_group:
+            votes[clean[pos]] = votes.get(clean[pos], 0.0) + conf
+        synthesized.append(max(votes, key=votes.get))
+
+    # Sentezin güveni: grubun en güvenilir üyesi kadar güvenilir kabul
+    # edilir (oylama en az en iyi üye kadar iyidir varsayımı)
+    max_conf = max(c for _, c in best_group)
+    return "".join(synthesized), max_conf
+
+
+def read_plate_ocr(image_variants, reader):
+    """
+    [YENİDEN YAZILDI — FORMAT-FARKINDA ÇOK STRATEJİLİ OCR]
+
+    ESKİ KODDAKİ SORUNLAR:
+    1. Tek görüntü varyantı üzerinde deniyordu — temizleme adımları
+       karaktere zarar verirse geri dönüş yolu yoktu.
+    2. En iyi sonuç SADECE güven oranına göre seçiliyordu. OCR bazen
+       çöp metne yüksek güven verir.
+
+    YENİ YAKLAŞIM:
+    1. BİRDEN FAZLA GÖRÜNTÜ VARYANTI (çağıran belirler):
+       "temiz" (tam temizlenmiş), "ham" (eğiklik düzeltilmiş kırpım),
+       "sade" (yalnızca 4x büyütülmüş dar kırpım). Her varyant farklı
+       hata türlerini telafi eder.
+    2. VARSAYILAN EASYOCR PARAMETRELERİ:
+       Deneylerle kanıtlandı: düşürülmüş text_threshold/low_text gibi
+       "ayarlı" parametreler gürültüyü metin bölgesine karıştırıp
+       doğruluğu DÜŞÜRÜYOR ('42AEH738' → '42M738' örneği). Varsayılan
+       parametreler + allowlist en isabetli kombinasyon.
+    3. STRATEJİLER: renkli + OTSU. Adaptif binarize KALDIRILDI —
+       testlerde tutarlı biçimde çöp üretti ('3448', 'B8BY5' gibi).
+    4. ÇOK SİNYALLİ SKORLAMA:
+       skor = güven
+            + geçerlilik bonusu (onarım maliyetiyle azalır: 1.0 - 0.15×maliyet)
+            + konsensüs bonusu (aynı sonucu veren her ek strateji: +0.15, en çok +0.30)
+            + altdizi bonusu (+0.25: başka geçerli adayı kapsayan daha
+              uzun geçerli aday — düşük çözünürlükte karakter DÜŞMESİ
+              yaygındır, ortaya karakter EKLENMESİ nadirdir; '42AH738'
+              yerine '42AEH738' tercih edilmeli)
+    5. KARAKTER OYLAMASI (ensemble): aynı yapıdaki geçerli adaylar
+       karakter bazında güven-ağırlıklı oylanır — tek karakter hataları
+       çoğunluk kararıyla düzelir (detay _character_vote'ta).
+
+    Parametreler:
+        image_variants: [(etiket, görüntü), ...] listesi
+        reader: EasyOCR Reader nesnesi
+
+    Returns:
+        best_text (str): En iyi ham OCR metni (veya None)
+        best_confidence (float): Güven oranı (0.0-1.0)
+        best_formatted (str): Formatlanmış plaka metni
+        best_valid (bool): Türk plaka yapısal kurallarına uyuyor mu?
+        best_score (float): Toplam skor (aday kutular arası karşılaştırma için)
+    """
     PLATE_ALLOWLIST = 'ABCDEFGHIJKLMNOPRSTUVYZ0123456789'
-    
+
+    # [DEĞİŞTİ] Varsayılan parametreler — deneyler ayarlı parametrelerin
+    # zarar verdiğini gösterdi (gerekçe docstring madde 2)
+    OCR_PARAMS = dict(allowlist=PLATE_ALLOWLIST, paragraph=False)
+
     candidates = []
-    
-    # ─── STRATEJİ 1: Renkli (iyileştirilmiş) görüntüde OCR ───
-    try:
-        result_color = reader.readtext(
-            plate_image,
-            allowlist=PLATE_ALLOWLIST,
-            paragraph=False  # Her metin bölgesini ayrı ayrı oku
-        )
-        if result_color:
-            # bbox'ları soldan sağa sırala (plaka sola-sağa okunur)
-            result_color.sort(key=lambda x: x[0][0][0])
-            text = "".join([t for (_, t, _) in result_color])
-            conf = sum([c for (_, _, c) in result_color]) / len(result_color)
-            candidates.append((text, conf, "renkli"))
-    except Exception as e:
-        print(f"    [OCR] Renkli okuma hatası: {e}")
-    
-    # ─── STRATEJİ 2: Binarize (siyah-beyaz) görüntüde OCR ───
-    try:
-        binary = adaptive_binarize(plate_image)
-        result_binary = reader.readtext(
-            binary,
-            allowlist=PLATE_ALLOWLIST,
-            paragraph=False
-        )
-        if result_binary:
-            result_binary.sort(key=lambda x: x[0][0][0])
-            text = "".join([t for (_, t, _) in result_binary])
-            conf = sum([c for (_, _, c) in result_binary]) / len(result_binary)
-            candidates.append((text, conf, "binarize"))
-    except Exception as e:
-        print(f"    [OCR] Binarize okuma hatası: {e}")
-    
-    # ─── STRATEJİ 3: Gri tonlama + OTSU eşikleme ile OCR ───
-    try:
-        if len(plate_image.shape) == 3:
-            gray = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = plate_image
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        result_otsu = reader.readtext(
-            otsu,
-            allowlist=PLATE_ALLOWLIST,
-            paragraph=False
-        )
-        if result_otsu:
-            result_otsu.sort(key=lambda x: x[0][0][0])
-            text = "".join([t for (_, t, _) in result_otsu])
-            conf = sum([c for (_, _, c) in result_otsu]) / len(result_otsu)
-            candidates.append((text, conf, "otsu"))
-    except Exception as e:
-        print(f"    [OCR] OTSU okuma hatası: {e}")
-    
+
+    for variant_label, variant_image in image_variants:
+        if variant_image is None or variant_image.size == 0:
+            continue
+
+        # [DEĞİŞTİ] Stratejiler: renkli + OTSU (adaptif binarize kaldırıldı)
+        strategies = [("renkli", variant_image)]
+        try:
+            if len(variant_image.shape) == 3:
+                gray = cv2.cvtColor(variant_image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = variant_image
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            strategies.append(("otsu", otsu))
+        except Exception:
+            pass
+
+        for strategy_name, strategy_image in strategies:
+            try:
+                result = reader.readtext(strategy_image, **OCR_PARAMS)
+            except Exception as e:
+                print(f"    [OCR] {variant_label}/{strategy_name} hatası: {e}")
+                continue
+
+            # [DEĞİŞTİ] merge artık birden fazla birleştirme hipotezi
+            # döndürüyor — her biri ayrı aday olarak skorlamaya girer
+            for text, conf, hyp_label in merge_ocr_fragments(result):
+                candidates.append((text, conf,
+                                   f"{variant_label}/{strategy_name}{hyp_label}"))
+
     if not candidates:
         print("    [OCR] Hiçbir strateji sonuç vermedi!")
-        return None, 0.0
-    
-    # En iyi sonucu seç: en yüksek güven oranı
-    best = max(candidates, key=lambda x: x[1])
-    print(f"    [OCR] Sonuçlar:")
+        return None, 0.0, "", False, 0.0
+
+    # ─── ADIM 1: Her adayı formatla ve onarım maliyetini al ───
+    processed = []
     for text, conf, strategy in candidates:
-        marker = " ✓" if (text, conf) == (best[0], best[1]) else ""
-        print(f"           {strategy:>8}: '{text}' (güven: {conf:.2f}){marker}")
-    
-    return best[0], best[1]
+        formatted, valid, repair_cost = format_turkish_plate_ex(text)
+        processed.append({
+            'text': text, 'conf': conf, 'strategy': strategy,
+            'formatted': formatted, 'valid': valid, 'cost': repair_cost,
+        })
+
+    # ─── ADIM 2: Karakter oylaması — geçerli adaylardan sentez üret ───
+    valid_pool = [(p['formatted'], p['conf']) for p in processed if p['valid']]
+    voted_text, voted_conf = _character_vote(valid_pool)
+    if voted_text:
+        formatted, valid, repair_cost = format_turkish_plate_ex(voted_text)
+        if valid and not any(p['formatted'] == formatted and p['strategy'] == 'oylama'
+                             for p in processed):
+            processed.append({
+                'text': voted_text, 'conf': voted_conf, 'strategy': 'oylama',
+                'formatted': formatted, 'valid': valid, 'cost': repair_cost,
+            })
+
+    # ─── ADIM 3: Çok sinyalli skorlama ───
+    # [DEĞİŞTİ] Konsensüs artık VARYANT AİLESİ bazında sayılır.
+    # NEDEN? temiz/ham/sade varyantları hepsi "kalın karakterli" aynı
+    # görüntü ailesindendir — düşük çözünürlükte A harfini üçü birden
+    # H okur (aynı kök neden = korelasyonlu hata). Bunları bağımsız
+    # kanıt saymak sistematik hatayı ödüllendiriyordu. "ince"
+    # (inceltilmiş) varyant ayrı ailedir; yalnız FARKLI ailelerin
+    # uzlaşması gerçek bağımsız doğrulamadır.
+    def variant_family(strategy):
+        return "ince" if strategy.startswith("ince") else "kalın"
+
+    format_families = {}
+    for p in processed:
+        if p['strategy'] != 'oylama':  # Sentez kendi kaynaklarını saymasın
+            format_families.setdefault(p['formatted'], set()).add(
+                variant_family(p['strategy']))
+
+    scored = []
+    for p in processed:
+        score = p['conf']
+
+        # Geçerlilik bonusu — onarım maliyetiyle azalır
+        if p['valid']:
+            score += max(0.3, 1.0 - 0.15 * p['cost'])
+        elif re.match(r'^\d{2} [A-Z]{1,3} \d{2,4}$', p['formatted']):
+            score += 0.2
+
+        # Konsensüs bonusu — FARKLI varyant aileleri aynı sonuca vardıysa
+        agreement = len(format_families.get(p['formatted'], set())) - 1
+        score += min(0.30, 0.15 * max(0, agreement))
+
+        # ─── İNCELTME ÇÖZÜMLEME BONUSU (A↔H) ───  [YENİ]
+        # Fiziksel mekanizma TEK YÖNLÜdür: bulanıklık/kalınlaşma A'nın
+        # iç boşluğunu doldurup H'ye çevirir; ama inceltme H'nin iki dik
+        # çizgisini A'nın üçgen tepesine ÇEVİREMEZ. Dolayısıyla ince
+        # varyant yüksek güvenle 'A' okuyorsa ve kalın varyantlar aynı
+        # pozisyonda 'H' diyorsa, 'A' okuması fiziksel olarak güvenilir
+        # olandır. (Deney: '20 HFB 280' 3 varyantta ısrarcıydı, ince
+        # varyant 1.00 güvenle '20 AFB 280' okudu — doğrusu da buydu.)
+        if p['valid'] and p['strategy'].startswith('ince') and p['conf'] >= 0.80:
+            my_clean = p['formatted'].replace(" ", "")
+            for q in processed:
+                if q is p or not q['valid'] or q['strategy'].startswith('ince'):
+                    continue
+                other = q['formatted'].replace(" ", "")
+                if len(other) == len(my_clean):
+                    diffs = [(a, b) for a, b in zip(my_clean, other) if a != b]
+                    if diffs and all(a == 'A' and b == 'H' for a, b in diffs):
+                        score += 0.35
+                        break
+
+        # Altdizi bonusu — bu geçerli aday, başka bir geçerli adayı
+        # altdizi olarak kapsıyorsa (karakter düşmesini telafi)
+        if p['valid']:
+            my_clean = p['formatted'].replace(" ", "")
+            for q in processed:
+                if q['valid'] and q is not p:
+                    other = q['formatted'].replace(" ", "")
+                    if len(other) < len(my_clean) and _is_subsequence(other, my_clean):
+                        score += 0.25
+                        break
+
+        scored.append((score, p))
+
+    scored.sort(key=lambda s: s[0], reverse=True)
+    best_score, best = scored[0]
+
+    print(f"    [OCR] Sonuçlar (skor = güven + geçerlilik + konsensüs + altdizi):")
+    for score, p in scored:
+        marker = " ✓" if p is best else ""
+        valid_str = "GEÇERLİ" if p['valid'] else "geçersiz"
+        print(f"           {p['strategy']:>14}: '{p['text']}' → '{p['formatted']}' "
+              f"[{valid_str}, onarım:{p['cost']}] (güven: {p['conf']:.2f}, "
+              f"skor: {score:.2f}){marker}")
+
+    return best['text'], best['conf'], best['formatted'], best['valid'], best_score
+
+
+def _is_subsequence(short, long):
+    """short'un tüm karakterleri long içinde aynı sırayla geçiyor mu?"""
+    it = iter(long)
+    return all(ch in it for ch in short)
 
 
 # =============================================================================
 # BÖLÜM 8: TÜRK PLAKA FORMAT DÜZELTMESİ
 # =============================================================================
 
-def format_turkish_plate(raw_text):
+# Harf → Rakam dönüşüm tablosu (OCR'ın karıştırdığı benzer şekiller)
+# Modül seviyesine taşındı — hem format hem doğrulama fonksiyonları kullanıyor
+LETTER_TO_DIGIT = {
+    'O': '0', 'Q': '0',  # O ve Q → 0
+    'I': '1', 'L': '1',  # I ve L → 1
+    'Z': '2',             # Z → 2
+    'S': '5',             # S → 5
+    'G': '6',             # G → 6
+    'T': '7',             # T → 7
+    'B': '8',             # B → 8
+}
+
+# Rakam → Harf dönüşüm tablosu
+DIGIT_TO_LETTER = {
+    '0': 'O',  # 0 → O
+    '1': 'I',  # 1 → I
+    '2': 'Z',  # 2 → Z
+    '5': 'S',  # 5 → S
+    '6': 'G',  # 6 → G
+    '8': 'B',  # 8 → B
+}
+
+
+def is_valid_turkish_plate(text):
     """
-    OCR çıktısını standart Türk plaka formatına düzeltir.
-    
-    TÜRK PLAKA FORMATI:
-    ┌─────────────────────────────────┐
-    │  İL KODU  HARF SERİSİ  NUMARA  │
-    │    XX       YYY          ZZZZ   │
-    └─────────────────────────────────┘
-    
-    - İl kodu: 01-81 arası 2 haneli rakam
-    - Harf serisi: 1-3 harf (A-Z, Q/W/X hariç)
-    - Numara: 2-4 haneli rakam
-    
-    Geçerli format örnekleri:
-    34 ABC 1234, 06 A 0001, 42 AEH 738
-    
-    REGEX AÇIKLAMASI:
-    ^(\\d{2})([A-Z]{1,3})(\\d{2,4})$
-    ^           → Metnin başı
-    (\\d{2})    → Tam 2 rakam (il kodu) — Grup 1
-    ([A-Z]{1,3}) → 1 ila 3 büyük harf (seri) — Grup 2
-    (\\d{2,4})  → 2 ila 4 rakam (numara) — Grup 3
-    $           → Metnin sonu
-    
-    EK DÜZELTMELER:
-    - Yaygın OCR hataları düzeltilir (0↔O, 1↔I, 8↔B gibi)
-    - Pozisyon bazlı: il kodu bölgesinde harf varsa rakama çevir,
-      harf bölgesinde rakam varsa harfe çevir
-    
+    [YENİ FONKSİYON — YAPISAL PLAKA DOĞRULAMA]
+
+    Eski kod sadece şekil kontrolü yapıyordu: "2 rakam + 1-3 harf + 2-4 rakam".
+    Ama Türk plaka sisteminde harf sayısı ile rakam sayısı BİRBİRİNE BAĞLIDIR:
+
+    ┌──────────────┬───────────────┬─────────────────┐
+    │ Harf sayısı  │ Rakam sayısı  │ Örnek           │
+    ├──────────────┼───────────────┼─────────────────┤
+    │ 1 harf       │ 4 rakam       │ 34 N 5953       │
+    │ 2 harf       │ 3 veya 4      │ 42 AH 738       │
+    │ 3 harf       │ 2 veya 3      │ 06 ABY 325      │
+    └──────────────┴───────────────┴─────────────────┘
+
+    Bu kural OCR artefaktlarını otomatik yakalar:
+    "06 ABY 3251" → 3 harf + 4 rakam = GEÇERSİZ → sondaki artefakt "1"
+    kırpılınca "06 ABY 325" = GEÇERLİ. (Gerçek test hatasından!)
+
+    Ek olarak il kodu 01-81 aralığında olmalıdır (Türkiye'de 81 il var).
+    "95 ABC 123" gibi okumalar kesinlikle OCR hatasıdır.
+
     Parametreler:
-        raw_text (str): OCR'dan gelen ham metin
-    
+        text (str): Boşluksuz aday metin (örn. "06ABY325")
+
     Returns:
-        formatted (str): Formatlanmış plaka metni (XX YYY ZZZZ)
+        bool: Tüm yapısal kurallara uyuyor mu?
     """
-    if not raw_text:
-        return ""
-    
-    # Temizle: boşluk, tire, nokta kaldır + büyük harfe çevir
-    text = raw_text.upper().replace(" ", "").replace("-", "").replace(".", "")
-    
-    # ─── YAYGN OCR HATA DÜZELTMELERİ ───
-    
-    # Önce direkt regex dene (temiz okuma durumu)
-    match = re.match(r'^(\d{2})([A-Z]{1,3})(\d{2,4})$', text)
-    if match:
-        return f"{match.group(1)} {match.group(2)} {match.group(3)}"
-    
-    # Eşleşmezse pozisyon bazlı düzeltme yap
-    # İl kodu bölgesi (ilk 2 karakter): rakam olmalı
-    # Harf bölgesi (ortadaki 1-3 karakter): harf olmalı
-    # Numara bölgesi (son 2-4 karakter): rakam olmalı
-    
-    # Harf → Rakam dönüşüm tablosu (OCR'ın karıştırdığı benzer şekiller)
-    letter_to_digit = {
-        'O': '0', 'Q': '0',  # O ve Q → 0
-        'I': '1', 'L': '1',  # I ve L → 1
-        'Z': '2',             # Z → 2
-        'S': '5',             # S → 5
-        'G': '6',             # G → 6
-        'T': '7',             # T → 7
-        'B': '8',             # B → 8
-    }
-    
-    # Rakam → Harf dönüşüm tablosu
-    digit_to_letter = {
-        '0': 'O',  # 0 → O
-        '1': 'I',  # 1 → I
-        '2': 'Z',  # 2 → Z
-        '5': 'S',  # 5 → S
-        '6': 'G',  # 6 → G
-        '8': 'B',  # 8 → B
-    }
-    
-    # Minimum 5 karakter (XX Y ZZ) olmalı
+    m = re.match(r'^(\d{2})([A-Z]{1,3})(\d{2,4})$', text)
+    if not m:
+        return False
+
+    # İl kodu kontrolü: 01-81
+    il_code = int(m.group(1))
+    if not (1 <= il_code <= 81):
+        return False
+
+    # Harf sayısı ↔ rakam sayısı ilişkisi
+    letter_count = len(m.group(2))
+    digit_count = len(m.group(3))
+    valid_combos = {(1, 4), (2, 3), (2, 4), (3, 2), (3, 3)}
+    return (letter_count, digit_count) in valid_combos
+
+
+def _positional_fix(text):
+    """
+    [YENİ YARDIMCI — POZİSYON BAZLI KARAKTER DÜZELTME]
+
+    Türk plakasının bölge yapısına göre karışan karakterleri düzeltir:
+    - İl kodu bölgesi (ilk 2 karakter): harf görünüyorsa rakama çevir
+      (örn. "O6ABY325" → "06ABY325")
+    - Numara bölgesi (sondaki rakam bloğu): harf karıştıysa rakama çevir
+      (örn. "34ABC7B8" → "34ABC788")
+      GÜVENLİK: sondan zaten 2+ gerçek rakam varsa harf çevirmeyi durdur —
+      yoksa "34ABT738"deki gerçek T harfi 7'ye çevrilirdi!
+    - Orta bölge (harf serisi): rakam karıştıysa harfe çevir
+      (örn. "340BC123" → "34OBC123")
+
+    Parametreler:
+        text (str): Boşluksuz ham metin
+
+    Returns:
+        str: Düzeltilmiş metin
+    """
     if len(text) < 5:
         return text
-    
-    # İlk 2 karakter → rakam yapma denemesi
-    corrected = list(text)
-    for i in range(min(2, len(corrected))):
-        if corrected[i].isalpha() and corrected[i] in letter_to_digit:
-            corrected[i] = letter_to_digit[corrected[i]]
-    
-    # Son kısım → rakam yapma denemesi (sondan 2-4 karakter)
-    # Ortadaki harfleri bul: ilk 2 rakamdan sonra, son rakamlardan önce
-    text_corrected = "".join(corrected)
-    match = re.match(r'^(\d{2})([A-Z]{1,3})(\d{2,4})$', text_corrected)
-    if match:
-        return f"{match.group(1)} {match.group(2)} {match.group(3)}"
-    
-    # Hâlâ eşleşmiyorsa, harf bölgesindeki rakamları harfe çevirmeyi dene
-    if len(text) >= 5:
-        part1 = text[:2]   # İl kodu
-        remaining = text[2:]
-        
-        # Harfleri ve rakamları ayır
-        letters = ""
-        for ch in remaining:
-            if ch.isalpha():
-                letters += ch
-            elif ch in digit_to_letter and len(letters) < 3 and not any(c.isdigit() for c in letters):
-                letters += digit_to_letter[ch]
-            else:
-                break
-        
-        numbers = remaining[len(letters):] if letters else remaining[1:]
-        
-        # İl kodunu düzelt
-        fixed_il = ""
-        for ch in part1:
-            if ch.isdigit():
-                fixed_il += ch
-            elif ch in letter_to_digit:
-                fixed_il += letter_to_digit[ch]
-            else:
-                fixed_il += ch
-        
-        # Numara kısmını düzelt
-        fixed_num = ""
-        for ch in numbers:
-            if ch.isdigit():
-                fixed_num += ch
-            elif ch in letter_to_digit:
-                fixed_num += letter_to_digit[ch]
-            else:
-                fixed_num += ch
-        
-        if len(fixed_il) == 2 and 1 <= len(letters) <= 3 and 2 <= len(fixed_num) <= 4:
-            return f"{fixed_il} {letters} {fixed_num}"
-    
-    # Hiçbir düzeltme çalışmadıysa ham metni döndür
-    return text
+
+    chars = list(text)
+
+    # 1) İl kodu bölgesi: ilk 2 karakter rakam olmalı
+    for i in range(2):
+        if chars[i] in LETTER_TO_DIGIT:
+            chars[i] = LETTER_TO_DIGIT[chars[i]]
+
+    # 2) Numara bölgesi: sondan geriye doğru rakam bloğunu belirle
+    j = len(chars) - 1
+    digit_count = 0
+    while j >= 2 and digit_count < 4:
+        c = chars[j]
+        if c.isdigit():
+            digit_count += 1
+            j -= 1
+        elif c in LETTER_TO_DIGIT and digit_count < 2:
+            # Sadece rakam bloğu henüz 2'den kısaysa harf→rakam çevir.
+            # (2+ rakam zaten varsa bu harf muhtemelen serinin son harfidir)
+            chars[j] = LETTER_TO_DIGIT[c]
+            digit_count += 1
+            j -= 1
+        else:
+            break
+
+    # 3) Orta bölge (2..j): harf serisi — rakamları harfe çevir
+    for k in range(2, j + 1):
+        if chars[k] in DIGIT_TO_LETTER:
+            chars[k] = DIGIT_TO_LETTER[chars[k]]
+
+    return "".join(chars)
+
+
+def format_turkish_plate_ex(raw_text):
+    """
+    [YENİDEN YAZILDI] OCR çıktısını standart Türk plaka formatına düzeltir,
+    YAPISAL GEÇERLİLİĞİNİ doğrular ve ONARIM MALİYETİNİ raporlar.
+
+    ESKİ KODDAN FARKLAR:
+    1. GEÇERLİLİK BİLGİSİ DÖNER — OCR skorlaması geçerli plakaları
+       güven farkına rağmen öne çekebilsin diye.
+    2. ARTEFAKT KIRPMA: Plaka çerçevesi/vida/gölge kaynaklı fazla
+       karakterleri baştan ve sondan 0-2 karakter kırparak dener.
+       Örn: "06ABY3251" (çerçeve kenarı '1' okundu) → son karakteri
+       kırp → "06ABY325" → yapısal olarak geçerli → kabul!
+    3. ONARIM MALİYETİ: kaç karakterin kırpıldığı + kaç karakterin
+       dönüştürüldüğü sayılır ve döndürülür.
+       NEDEN KRİTİK? İlk sürümde agresif onarım, çöp okumaları bile
+       "geçerli" plakaya dönüştürüp yüksek skor almalarını sağlıyordu
+       (gerçek hata: '3LM5953' onarımla '31 M 5953' olup doğru okuma
+       '34N5953'ü yendi!). Skorlama artık onarım maliyetiyle orantılı
+       ceza keser: onarımsız geçerli okuma her zaman önde olur.
+    4. TÜM ONARIM YOLLARI DENENİR, EN UCUZU SEÇİLİR:
+       Eşit maliyette dönüşümü az olan tercih edilir — kırpma kenar
+       artefaktı atar (yaygın ve güvenli), dönüşüm ise karakter kanıtını
+       değiştirir (daha riskli).
+
+    Parametreler:
+        raw_text (str): OCR'dan gelen ham metin
+
+    Returns:
+        formatted (str): Formatlanmış plaka metni ("XX YYY ZZZZ")
+        valid (bool): Türk plaka yapısal kurallarına uyuyor mu?
+        repair_cost (int): Onarım maliyeti (0 = hiç onarım gerekmedi)
+    """
+    if not raw_text:
+        return "", False, 0
+
+    # Temizle: harf/rakam dışındaki her şeyi at + büyük harfe çevir
+    text = re.sub(r'[^A-Z0-9]', '', raw_text.upper())
+
+    if len(text) < 5:
+        return text, False, 0
+
+    # ─── TÜM ONARIM YOLLARINI TOPLA, EN UCUZUNU SEÇ ───
+    # Kırpma kombinasyonları (0-2 baştan, 0-2 sondan) × (ham, düzeltilmiş)
+    n = len(text)
+    valid_options = []   # (toplam_maliyet, dönüşüm_sayısı, düzeltilmiş_metin)
+    seen = set()
+    MAX_REPAIR_COST = 3  # Bundan pahalı onarımlar güvenilmez — kabul etme
+
+    for lead in range(0, 3):
+        for trail in range(0, 3):
+            if n - lead - trail < 5:
+                continue
+            candidate = text[lead:n - trail] if trail else text[lead:]
+            fixed = _positional_fix(candidate)
+            # Dönüşüm sayısı: pozisyon düzeltmesinin değiştirdiği karakterler
+            conversions = sum(1 for a, b in zip(candidate, fixed) if a != b)
+
+            for variant, conv_count in ((candidate, 0), (fixed, conversions)):
+                if variant in seen:
+                    continue
+                seen.add(variant)
+                cost = lead + trail + conv_count
+                if cost > MAX_REPAIR_COST:
+                    continue
+                if is_valid_turkish_plate(variant):
+                    valid_options.append((cost, conv_count, variant))
+
+    if valid_options:
+        # En düşük maliyet; eşitlikte en az dönüşüm (kırpma > dönüşüm tercihi)
+        valid_options.sort(key=lambda o: (o[0], o[1]))
+        cost, _, best = valid_options[0]
+        m = re.match(r'^(\d{2})([A-Z]{1,3})(\d{2,4})$', best)
+        return f"{m.group(1)} {m.group(2)} {m.group(3)}", True, cost
+
+    # ─── GEÇERLİ SONUÇ YOK — EN İYİ ÇABA FORMATLAMASI ───
+    # Yapısal kural geçmese bile şekil uyuyorsa boşluklu formatla döndür
+    # (kullanıcı çıktıda yine de okuyabilsin)
+    fixed = _positional_fix(text)
+    m = re.match(r'^(\d{2})([A-Z]{1,3})(\d{2,4})$', fixed)
+    if m:
+        return f"{m.group(1)} {m.group(2)} {m.group(3)}", False, 0
+
+    return text, False, 0
+
+
+def format_turkish_plate(raw_text):
+    """Geriye dönük uyumlu sarmalayıcı — (metin, geçerli_mi) döndürür."""
+    formatted, valid, _ = format_turkish_plate_ex(raw_text)
+    return formatted, valid
+
+
+# =============================================================================
+# BÖLÜM 8.5: ÇOK GEÇİŞLİ PLAKA TESPİTİ VE EĞİKLİK DÜZELTME  [YENİ]
+# =============================================================================
+
+def detect_plate_boxes(model, frame, device):
+    """
+    [YENİ FONKSİYON — TESPİT HATALARININ ANA ÇÖZÜMÜ]
+
+    ESKİ KODDAKİ SORUN:
+    model.predict() varsayılan imgsz=640 ile çalışıyordu. 2048x1536 gibi
+    yüksek çözünürlüklü fotoğraflar YOLO'ya girmeden önce 640px'e
+    küçültülüyordu → plaka görüntüde 15-25 piksele düşüyordu → model
+    plakayı HİÇ tespit edemiyordu. Test setindeki 6 görüntünün 3'ünde
+    başarısızlığın kök nedeni buydu (OCR değil, tespit aşaması!).
+
+    YENİ YAKLAŞIM — KADEMELİ ÇOK GEÇİŞLİ TESPİT:
+    1. Geçiş: imgsz=1280, conf=0.25 → normal durumlar (hızlı ve güvenilir)
+    2. Geçiş: imgsz=1920, conf=0.10 → küçük/uzak plakalar
+    3. Geçiş: imgsz=640,  conf=0.03 → modelin EĞİTİM çözünürlüğü + çok
+       düşük eşik. Deneyler gösterdi ki model eğitildiği 640px'te bazı
+       plakaları düşük güvenle de olsa görebiliyorken, yüksek
+       çözünürlüklerde hiç göremiyor (ölçek genellemesi zayıf).
+       Düşük eşiğin riski yok: geometri filtresi + OCR yapısal
+       doğrulaması yanlış tespitleri zaten eler.
+
+    Çoğu görüntü 1. geçişte bulunur (ek maliyet yok). Sadece tespit
+    başarısız olursa diğer geçişlere düşülür.
+
+    Parametreler:
+        model: YOLO model nesnesi
+        frame (np.ndarray): BGR formatında tam kare görüntü
+        device (str): "0" (GPU) veya "cpu"
+
+    Returns:
+        valid_boxes (list): [(x1, y1, x2, y2, conf, ar), ...] güvene göre sıralı
+        pass_no (int): Kaçıncı geçişte bulunduğu (istatistik için)
+    """
+    # Plaka geometri filtresi sınırları (eski koddan taşındı)
+    PLATE_AR_MIN = 1.5   # Minimum en/boy oranı (eğik açı toleransı)
+    PLATE_AR_MAX = 7.5   # Maximum en/boy oranı
+    MIN_WIDTH = 30       # Minimum plaka genişliği (piksel)
+    MIN_HEIGHT = 10      # Minimum plaka yüksekliği (piksel)
+
+    # Kademeli geçiş planı: önce ucuz/hızlı, gerekirse alternatif ölçekler
+    # [DEĞİŞTİ] 3. geçiş 2560+TTA yerine 640+conf=0.03 yapıldı —
+    # deneyler 2560'ın hiçbir ek plaka bulamadığını, 640'ın (eğitim
+    # çözünürlüğü) ise düşük eşikte ek plakalar yakaladığını gösterdi
+    detection_passes = [
+        {"imgsz": 1280, "conf": 0.25},
+        {"imgsz": 1920, "conf": 0.10},
+        {"imgsz": 640,  "conf": 0.03},
+    ]
+
+    for pass_no, params in enumerate(detection_passes, 1):
+        results = model.predict(source=frame, device=device, verbose=False, **params)
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            print(f"    [TESPİT] Geçiş {pass_no} (imgsz={params['imgsz']}, "
+                  f"conf={params['conf']}): tespit yok")
+            continue
+
+        valid_boxes = []
+        for i in range(len(boxes)):
+            bx1, by1, bx2, by2 = map(int, boxes[i].xyxy[0])
+            bw, bh = bx2 - bx1, by2 - by1
+            bconf = float(boxes[i].conf[0])
+
+            if bh <= 0 or bw <= 0:
+                continue
+
+            ar = bw / bh
+            if (PLATE_AR_MIN <= ar <= PLATE_AR_MAX and
+                    bw >= MIN_WIDTH and bh >= MIN_HEIGHT):
+                valid_boxes.append((bx1, by1, bx2, by2, bconf, ar))
+
+        if valid_boxes:
+            # En güvenilir kutu önce
+            valid_boxes.sort(key=lambda b: b[4], reverse=True)
+            print(f"    [TESPİT] Geçiş {pass_no} (imgsz={params['imgsz']}): "
+                  f"{len(valid_boxes)} geçerli plaka bulundu")
+            return valid_boxes, pass_no
+
+        print(f"    [TESPİT] Geçiş {pass_no}: tespitler geometri filtresine takıldı")
+
+    return [], len(detection_passes)
+
+
+def detect_plate_classical(frame, max_candidates=3):
+    """
+    [YENİ FONKSİYON — KLASİK GÖRÜNTÜ İŞLEME İLE YEDEK PLAKA TESPİTİ]
+
+    NEDEN GEREKLİ?
+    YOLO modeli (best.pt) bazı açılardan/koşullardan çekilen plakaları
+    conf=0.01'de bile HİÇ tespit edemiyor (deneylerle doğrulandı —
+    model bu tür örneklerle yeterince eğitilmemiş). Model yeniden
+    eğitilene kadar, derin öğrenme gerektirmeyen klasik bir plaka
+    bulucu son çare olarak devreye girer.
+
+    ALGORİTMA (klasik ANPR ön-tespit yaklaşımı):
+    1. Görüntüyü ~1200px çalışma genişliğine ölçekle (hız/detay dengesi)
+    2. BLACKHAT morfolojisi: parlak zemin üzerindeki koyu yapıları
+       (plaka harfleri!) vurgular — plakanın imzası budur
+    3. Parlaklık maskesi: plaka zemini beyazdır → OTSU ile parlak
+       bölgeleri maskele
+    4. X-yönlü Sobel gradyanı: harflerin dikey kenarları yan yana
+       dizilince güçlü yatay gradyan deseni oluşur
+    5. Gauss bulanıklaştırma + yatay kapama (closing): harf kenarlarını
+       tek bitişik blok haline getir
+    6. Kontur analizi: en/boy oranı ve boyut plaka geometrisine uyan,
+       zemini yeterince parlak bölgeleri skorla
+
+    AR ALT SINIRI NEDEN 1.3 (2.0 DEĞİL)?
+    Morfolojik kapama plaka blobunu bazen üstündeki/altındaki tampon
+    çizgisiyle birleştirir → blob plakadan daha kare görünür (deneyde
+    AR=1.5 ölçüldü). Gevşek sınır kabul edilir çünkü asıl doğrulamayı
+    OCR + yapısal plaka kuralları yapar — yanlış adaylar orada elenir.
+
+    Parametreler:
+        frame (np.ndarray): BGR formatında tam kare görüntü
+        max_candidates (int): Döndürülecek en iyi aday sayısı
+
+    Returns:
+        candidates (list): [(x1, y1, x2, y2, skor, ar), ...] skora göre sıralı
+                           (koordinatlar orijinal görüntü ölçeğinde)
+    """
+    H, W = frame.shape[:2]
+
+    # Çalışma ölçeği: ~1200px genişlik (küçük görüntüler en fazla 2.5x büyür)
+    scale = min(1200.0 / W, 2.5)
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    img = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=interp)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    ih, iw = gray.shape[:2]
+
+    # 1) Blackhat: kapanış(görüntü) - görüntü → parlak zemindeki koyu
+    #    detayları (harfleri) beyaz olarak öne çıkarır
+    #    Kernel (25,7): yatay uzun — plaka metin bloğunun şekline uygun
+    rect_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, rect_kern)
+
+    # 2) Parlak bölgeler maskesi (plaka zemini beyaz/açık renk)
+    square_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    light = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, square_kern)
+    _, light = cv2.threshold(light, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+    # 3) X-yönlü gradyan — harf dikey kenarlarının yoğun olduğu bölgeler
+    grad_x = cv2.Sobel(blackhat, ddepth=cv2.CV_32F, dx=1, dy=0, ksize=-1)
+    grad_x = np.absolute(grad_x)
+    mn, mx = grad_x.min(), grad_x.max()
+    grad_x = (255 * ((grad_x - mn) / (mx - mn + 1e-6))).astype("uint8")
+
+    # 4) Bulanıklaştır + yatay kapama → harfleri tek blok yap + eşikle
+    grad_x = cv2.GaussianBlur(grad_x, (7, 7), 0)
+    grad_x = cv2.morphologyEx(grad_x, cv2.MORPH_CLOSE, rect_kern)
+    _, thresh = cv2.threshold(grad_x, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+    # 5) Gürültü temizliği + parlaklık maskesiyle kesişim
+    #    (koyu zeminli sahte bloklar elenir — plaka zemini parlak olmalı)
+    thresh = cv2.erode(thresh, None, iterations=2)
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    thresh = cv2.bitwise_and(thresh, thresh, mask=light)
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    thresh = cv2.erode(thresh, None, iterations=1)
+
+    # 6) Kontur analizi ve skorlama
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    scored = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        ar = w / float(h) if h else 0
+        # Geometri filtresi (gevşek — kesin karar OCR doğrulamasında)
+        if not (1.3 <= ar <= 8.0):
+            continue
+        if w < 50 or h < 12 or w > 0.6 * iw or h > 0.3 * ih:
+            continue
+        # Zemin parlaklığı: bölgenin en az %35'i parlak olmalı
+        white_ratio = light[y:y+h, x:x+w].mean() / 255.0
+        if white_ratio < 0.35:
+            continue
+        # Skor = parlaklık × metin enerjisi (blackhat yoğunluğu) × alan
+        # Üçü birden yüksekse: parlak zeminli, koyu metinli, büyükçe bölge
+        text_energy = blackhat[y:y+h, x:x+w].mean() / 255.0
+        score = white_ratio * text_energy * w * h
+        scored.append((score, x, y, w, h))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+
+    # Koordinatları orijinal ölçeğe geri çevir
+    candidates = []
+    for score, x, y, w, h in scored[:max_candidates]:
+        x1, y1 = int(x / scale), int(y / scale)
+        x2, y2 = int((x + w) / scale), int((y + h) / scale)
+        ar = (x2 - x1) / max(1, (y2 - y1))
+        candidates.append((x1, y1, x2, y2, score, ar))
+
+    return candidates
+
+
+def rectify_plate(plate_crop):
+    """
+    [YENİ FONKSİYON — EĞİK PLAKALARI DÜZLEŞTİRME]
+
+    NEDEN GEREKLİ?
+    Araç fotoğrafları nadiren tam karşıdan çekilir. Eğik plakalarda
+    karakterler yatık durur ve OCR doğruluğu ciddi düşer. Küçük bir
+    döndürme düzeltmesi (deskew) bile OCR başarısını belirgin artırır.
+
+    NASIL ÇALIŞIR:
+    1. OTSU eşikleme ile parlak plaka gövdesini maskele
+       (plaka beyaz/açık renkli olduğu için en büyük parlak bölgedir)
+    2. En büyük konturun minAreaRect'i ile eğim açısını ölç
+       (minAreaRect: konturu çevreleyen DÖNDÜRÜLMÜŞ minimum dikdörtgen —
+        boundingRect'ten farkı, açıyı da vermesidir)
+    3. Açı 1°-30° aralığındaysa görüntüyü ters yönde döndürerek düzelt
+       - <1°: zaten düz, dokunma (gereksiz interpolasyon kaybı olmasın)
+       - >30°: muhtemelen yanlış kontur ölçümü, güvenme
+
+    Parametreler:
+        plate_crop (np.ndarray): BGR formatında plaka kırpımı
+
+    Returns:
+        result (np.ndarray): Düzleştirilmiş (veya orijinal) görüntü
+        was_rotated (bool): Döndürme uygulandı mı?
+    """
+    h, w = plate_crop.shape[:2]
+    # Çok küçük kırpımlarda güvenilir açı ölçülemez
+    if h < 15 or w < 40:
+        return plate_crop, False
+
+    gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # THRESH_BINARY + OTSU: parlak bölgeler (plaka gövdesi) beyaz olur
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return plate_crop, False
+
+    largest = max(contours, key=cv2.contourArea)
+    # Plaka gövdesi kırpımın en az %30'unu kaplamalı — yoksa yanlış kontur
+    if cv2.contourArea(largest) < 0.30 * h * w:
+        return plate_crop, False
+
+    # minAreaRect açı kuralı: OpenCV açıyı [-90, 0) aralığında döndürür,
+    # genişlik/yükseklik hangisinin uzun olduğuna göre yorumlanmalı
+    (_, _), (rw, rh), angle = cv2.minAreaRect(largest)
+    if rw < rh:
+        angle += 90
+    if angle > 45:
+        angle -= 90
+
+    # Anlamlı ama güvenilir aralıktaki açılarda düzelt
+    if abs(angle) < 1.0 or abs(angle) > 30.0:
+        return plate_crop, False
+
+    # Görüntü merkezinde ters yönde döndür
+    # BORDER_REPLICATE: döndürme sonrası köşe boşluklarını kenar pikselleriyle
+    # doldurur — siyah üçgenler OCR'ı yanıltmasın diye
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    rotated = cv2.warpAffine(plate_crop, M, (w, h),
+                             flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    print(f"    [EĞİM] {angle:.1f}° eğiklik düzeltildi")
+    return rotated, True
 
 
 # =============================================================================
 # BÖLÜM 9: TEK GÖRÜNTÜ İŞLEME PİPELINE'I
 # =============================================================================
+
+def process_plate_candidate(frame, box, reader, output_dir, stem, save_debug, tag=""):
+    """
+    [YENİ FONKSİYON — TEK ADAY KUTUNUN UÇTAN UCA İŞLENMESİ]
+
+    Tespit edilen tek bir aday kutuyu işler:
+    kırpım → eğiklik düzeltme → temizleme → 3 görüntü varyantı → OCR.
+
+    NEDEN AYRI FONKSİYON?
+    Tespit aşaması artık birden fazla aday kutu döndürebiliyor (özellikle
+    klasik CV yedek dedektöründe ilk aday plaka olmayabilir). Her aday bu
+    fonksiyonla bağımsız işlenir; çağıran taraf yapısal olarak geçerli
+    plaka veren ilk adayı kabul eder.
+
+    ÜÇ GÖRÜNTÜ VARYANTI — NEDEN?
+    Deneyler her varyantın farklı görüntülerde kazandığını gösterdi:
+    - "sade": paysız dar kırpım + 4x büyütme (eski pipeline davranışı).
+      Kırpım payı bazı görüntülerde çerçeve/tampon gölgelerini OCR'a
+      sokup sahte karakter okutuyordu — sade varyant bundan etkilenmez.
+    - "temiz": sticker/bant/altlık temizliği + iyileştirme. Kirli
+      plakalarda en iyi sonucu verir.
+    - "ham": kırpım paylı + eğiklik düzeltilmiş + iyileştirilmiş.
+      Temizleme adımları karaktere zarar verdiyse telafi eder,
+      eğik plakalarda kazanır.
+
+    Parametreler:
+        frame (np.ndarray): Tam kare BGR görüntü
+        box (tuple): (x1, y1, x2, y2, güven, ar) aday kutu
+        reader: EasyOCR Reader nesnesi
+        output_dir (str): Debug klasörü (None = kaydetme)
+        stem (str): Debug dosya adı kökü
+        save_debug (bool): Ara görüntüleri kaydet?
+        tag (str): Debug dosya adlarına eklenen aday etiketi
+
+    Returns:
+        result (dict): plate_text, confidence, formatted, valid, score, steps
+                       veya None (kırpım geçersizse)
+    """
+    x1, y1, x2, y2, detect_conf, ar = box
+    steps = []
+
+    # ─── KIRPIM PAYI (PADDING) ───
+    # Eğiklik düzeltme için plaka sınırının görünmesi gerekir; kutu her
+    # yönde küçük bir payla genişletilir (yatay %4, dikey %10).
+    # Paysız "dar" kırpım da ayrıca tutulur — sade varyantın temeli.
+    fh, fw = frame.shape[:2]
+    pad_x = max(2, int((x2 - x1) * 0.04))
+    pad_y = max(2, int((y2 - y1) * 0.10))
+    px1, py1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+    px2, py2 = min(fw, x2 + pad_x), min(fh, y2 + pad_y)
+
+    tight_crop = frame[y1:y2, x1:x2]      # Paysız dar kırpım
+    padded_crop = frame[py1:py2, px1:px2]  # Paylı kırpım
+
+    if tight_crop.size == 0 or padded_crop.size == 0:
+        return None
+
+    if save_debug and output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_01_original_crop.jpg"), tight_crop)
+
+    # ─── EĞİKLİK DÜZELTME (DESKEW) ───  [YENİ]
+    # Paylı kırpımda yapılır (plaka sınırı görünür olmalı ki açı ölçülsün)
+    rectified, was_rotated = rectify_plate(padded_crop)
+    if was_rotated:
+        steps.append("Eğiklik düzeltildi")
+        if save_debug and output_dir:
+            cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_01b_rectified.jpg"), rectified)
+
+    # ─── TEMİZLEME ZİNCİRİ (dar kırpım üzerinde) ───
+    current = tight_crop.copy()
+
+    print(f"  [2/7] Mavi TR bandı kontrolü...")
+    current, blue_found, blue_width = detect_blue_band(current)
+    if blue_found:
+        steps.append(f"Mavi bant temizlendi ({blue_width}px)")
+    if save_debug and output_dir:
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_02_no_blue.jpg"), current)
+
+    print(f"  [3/7] Turuncu sticker kontrolü...")
+    current, orange_found = detect_and_remove_orange_sticker(current)
+    if orange_found:
+        steps.append("Turuncu sticker temizlendi")
+    if save_debug and output_dir:
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_03_no_orange.jpg"), current)
+
+    print(f"  [4/7] Siyah sticker kontrolü...")
+    current, black_found = detect_and_remove_black_sticker(current)
+    if black_found:
+        steps.append("Siyah sticker temizlendi")
+    if save_debug and output_dir:
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_04_no_black.jpg"), current)
+
+    print(f"  [5/7] Plaka altlığı/çerçeve kontrolü...")
+    current = remove_plate_frame_and_holder(current)
+    steps.append("Altlık/çerçeve temizlendi")
+    if save_debug and output_dir:
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_05_no_frame.jpg"), current)
+
+    # ─── DÖRT GÖRÜNTÜ VARYANTI HAZIRLA ───  [DEĞİŞTİ]
+    print(f"  [6/7] Görüntü iyileştirme (4 varyant hazırlanıyor)...")
+    enhanced_clean = enhance_plate_for_ocr(current)      # "temiz"
+    enhanced_raw = enhance_plate_for_ocr(rectified)      # "ham"
+    # "sade": eski pipeline'ın birebir davranışı — 4x bikübik büyütme,
+    # başka hiçbir işlem yok (bazı plakalarda en isabetli okuma bu!)
+    plain_4x = cv2.resize(tight_crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+
+    # "ince": gri tonlama + büyütme + DİLASYON (karakter inceltme)  [YENİ]
+    # NEDEN? Düşük çözünürlüklü plakalarda bulanıklık karakter çizgilerini
+    # kalınlaştırıp birbirine yapıştırır — A harfinin üçgen iç boşluğu
+    # dolunca OCR onu H okur (gerçek hata: '20 AFB 280' → '20 HFB 280').
+    # Gri görüntüde dilasyon parlak (beyaz) alanı genişletir = siyah
+    # karakter çizgilerini İNCELTİR → yapışan çizgiler ayrışır, A'nın iç
+    # boşluğu geri açılır. Deney sonucu: 'HFB' (0.60) → 'AFB' (1.00)!
+    # Hedef yükseklik ~270px: inceltme deneyde 6x büyütmede doğrulandı,
+    # ölçek kırpım boyutuna göre uyarlanır.
+    gray_crop = cv2.cvtColor(tight_crop, cv2.COLOR_BGR2GRAY)
+    thin_scale = min(max(270.0 / max(gray_crop.shape[0], 1), 1.0), 8.0)
+    gray_up = cv2.resize(gray_crop, None, fx=thin_scale, fy=thin_scale,
+                         interpolation=cv2.INTER_CUBIC)
+    thinned = cv2.dilate(gray_up, np.ones((3, 3), np.uint8), iterations=2)
+
+    steps.append("OCR iyileştirme uygulandı (temiz + ham + sade + ince varyantları)")
+    if save_debug and output_dir:
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06_enhanced.jpg"), enhanced_clean)
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06b_enhanced_raw.jpg"), enhanced_raw)
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06c_plain4x.jpg"), plain_4x)
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06d_thinned.jpg"), thinned)
+
+    # ─── OCR OKUMA ───  [DEĞİŞTİ]
+    # read_plate_ocr formatlama + doğrulama + skorlamayı içerir;
+    # en iyi aday güven + yapısal geçerlilik + konsensüs ile seçilir
+    print(f"  [7/7] OCR okuma (4 varyant × 2 strateji + oylama)...")
+    plate_text, confidence, formatted, valid, score = read_plate_ocr(
+        [("temiz", enhanced_clean), ("ham", enhanced_raw),
+         ("sade", plain_4x), ("ince", thinned)],
+        reader
+    )
+
+    steps.append(f"OCR: '{plate_text}' → Format: '{formatted}' "
+                 f"({'GEÇERLİ' if valid else 'doğrulanamadı'}, güven: {confidence:.2f})")
+
+    return {
+        'plate_text': plate_text,
+        'confidence': confidence,
+        'formatted': formatted,
+        'valid': valid,
+        'score': score,
+        'steps': steps,
+    }
+
 
 def process_single_image(image_path, model, reader, output_dir=None, save_debug=True):
     """
@@ -1079,147 +1820,93 @@ def process_single_image(image_path, model, reader, output_dir=None, save_debug=
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"  [HATA] Görüntü okunamadı: {image_path}")
-        return {'file': filename, 'plate_text': None, 'formatted': '', 
-                'confidence': 0.0, 'steps': ['HATA: Dosya okunamadı']}
+        return {'file': filename, 'plate_text': None, 'formatted': '',
+                'confidence': 0.0, 'valid': False, 'steps': ['HATA: Dosya okunamadı']}
     
-    # ─── ADIM 1: YOLO ile plaka tespiti ───
-    print(f"  [1/7] YOLO plaka tespiti...")
+    # ─── ADIM 1: ÇOK GEÇİŞLİ YOLO TESPİTİ + KLASİK CV YEDEĞİ ───  [DEĞİŞTİ]
+    # ESKİ: tek geçiş, varsayılan imgsz=640 → yüksek çözünürlüklü
+    #       fotoğraflarda plaka 640px'e küçülünce tespit edilemiyordu.
+    # YENİ: 1) detect_plate_boxes() kademeli ölçek/eşiklerle dener
+    #       2) YOLO tamamen başarısızsa detect_plate_classical()
+    #          (blackhat morfolojisi) aday bölgeler önerir
+    print(f"  [1/7] YOLO plaka tespiti (çok geçişli)...")
     gpu_available = torch.cuda.is_available()
     device = "0" if gpu_available else "cpu"
-    # Düşük conf eşiği (0.25) kullanıyoruz çünkü:
-    # - Bazı açılardan çekilen plakalar düşük güvenle tespit edilebilir
-    # - Aspect ratio filtresi ile yanlış tespitleri zaten eleyeceğiz
-    results = model.predict(source=image_path, conf=0.25, device=device, verbose=False)
-    
-    boxes = results[0].boxes
-    if boxes is None or len(boxes) == 0:
-        print(f"  [SONUÇ] Plaka tespit EDİLEMEDİ!")
-        return {'file': filename, 'plate_text': None, 'formatted': '', 
-                'confidence': 0.0, 'steps': ['Plaka tespit edilemedi']}
-    
-    # ─── PLAKA DOĞRULAMA (Aspect Ratio Filtresi) ───
-    # YOLO bazen plaka olmayan nesneleri de tespit edebilir:
-    # - Watermark yazıları (1779045735949 fotoğrafındaki #1313759809)
-    # - Araba logoları, far kenarları vb.
-    #
-    # Türk plakası fiziksel ölçüleri: 520mm x 110mm → aspect ratio ≈ 4.7:1
-    # Kabul edilebilir aralık: 2.0 - 7.0 (açı ve perspektif farkları için geniş)
-    # - 2.0: çok eğik açıdan görülen plakalar
-    # - 7.0: uzun ama dar perspektif
-    #
-    # Minimum boyut: en az 30px genişlik ve 10px yükseklik
-    # (bundan küçük tespitler OCR için kullanılamaz)
-    
-    PLATE_AR_MIN = 1.5   # Minimum aspect ratio (düşük açı ve kırpma toleransı)
-    PLATE_AR_MAX = 7.0   # Maximum aspect ratio
-    MIN_WIDTH = 30        # Minimum plaka genişliği (piksel)
-    MIN_HEIGHT = 10       # Minimum plaka yüksekliği (piksel)
-    
-    # Tüm tespitleri aspect ratio ile filtrele, güvene göre sırala
-    valid_boxes = []
-    for i in range(len(boxes)):
-        bx1, by1, bx2, by2 = map(int, boxes[i].xyxy[0])
-        bw = bx2 - bx1
-        bh = by2 - by1
-        bconf = float(boxes[i].conf[0])
-        
-        if bh <= 0 or bw <= 0:
-            continue
-            
-        ar = bw / bh  # Aspect ratio
-        
-        if (PLATE_AR_MIN <= ar <= PLATE_AR_MAX and 
-            bw >= MIN_WIDTH and bh >= MIN_HEIGHT):
-            valid_boxes.append((bx1, by1, bx2, by2, bconf, ar))
-            print(f"    Tespit #{i+1}: ({bx1},{by1})-({bx2},{by2}) "
-                  f"AR={ar:.1f} Güven={bconf:.2f} ✓ GEÇERLİ")
-        else:
-            print(f"    Tespit #{i+1}: ({bx1},{by1})-({bx2},{by2}) "
-                  f"AR={bw/bh:.1f} Güven={bconf:.2f} ✗ REDDEDİLDİ "
-                  f"({'AR dışı' if not (PLATE_AR_MIN <= ar <= PLATE_AR_MAX) else 'çok küçük'})")
-    
+
+    valid_boxes, pass_no = detect_plate_boxes(model, frame, device)
+    detection_source = "YOLO"
+
     if not valid_boxes:
-        print(f"  [SONUÇ] Geçerli plaka tespiti bulunamadı (aspect ratio filtresi)")
-        return {'file': filename, 'plate_text': None, 'formatted': '', 
-                'confidence': 0.0, 'steps': ['Tespit var ama plaka boyutlarına uymuyor']}
-    
-    # En yüksek güvenli geçerli kutuyu seç
-    valid_boxes.sort(key=lambda x: x[4], reverse=True)
-    x1, y1, x2, y2, detect_conf, ar = valid_boxes[0]
-    
-    plate_crop = frame[y1:y2, x1:x2]
-    print(f"  [1/7] Plaka bulundu! Konum: ({x1},{y1})-({x2},{y2}), "
-          f"Güven: {detect_conf:.2f}, AR: {ar:.1f}")
-    
-    steps = [f"YOLO tespit (güven: {detect_conf:.2f}, AR: {ar:.1f})"]
-    
-    # Debug kayıt dizini oluştur
-    if save_debug and output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_01_original_crop.jpg"), plate_crop)
-    
-    current = plate_crop.copy()
-    
-    # ─── ADIM 2: Mavi TR bandı ───
-    print(f"  [2/7] Mavi TR bandı kontrolü...")
-    current, blue_found, blue_width = detect_blue_band(current)
-    if blue_found:
-        steps.append(f"Mavi bant kırpıldı ({blue_width}px)")
-    if save_debug and output_dir:
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_02_no_blue.jpg"), current)
-    
-    # ─── ADIM 3: Turuncu sticker ───
-    print(f"  [3/7] Turuncu sticker kontrolü...")
-    current, orange_found = detect_and_remove_orange_sticker(current)
-    if orange_found:
-        steps.append("Turuncu sticker temizlendi")
-    if save_debug and output_dir:
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_03_no_orange.jpg"), current)
-    
-    # ─── ADIM 4: Siyah sticker ───
-    print(f"  [4/7] Siyah sticker kontrolü...")
-    current, black_found = detect_and_remove_black_sticker(current)
-    if black_found:
-        steps.append("Siyah sticker temizlendi")
-    if save_debug and output_dir:
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_04_no_black.jpg"), current)
-    
-    # ─── ADIM 5: Plaka altlığı ve çerçeve ───
-    print(f"  [5/7] Plaka altlığı/çerçeve kontrolü...")
-    current = remove_plate_frame_and_holder(current)
-    steps.append("Altlık/çerçeve temizlendi")
-    if save_debug and output_dir:
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_05_no_frame.jpg"), current)
-    
-    # ─── ADIM 6: OCR için iyileştirme ───
-    print(f"  [6/7] Görüntü iyileştirme (4x büyütme + CLAHE + keskinleştirme)...")
-    enhanced = enhance_plate_for_ocr(current)
-    steps.append("OCR iyileştirme uygulandı")
-    if save_debug and output_dir:
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_06_enhanced.jpg"), enhanced)
-        # OCR'ın beslendiği siyah-beyaz binarize halini de kaydedelim
-        binarized = adaptive_binarize(enhanced)
-        cv2.imwrite(os.path.join(output_dir, f"{stem}_07_binarized.jpg"), binarized)
-    
-    # ─── ADIM 7: OCR okuma ───
-    print(f"  [7/7] OCR okuma (çok stratejili)...")
-    plate_text, confidence = read_plate_ocr(enhanced, reader)
-    
-    # Format düzelt
-    formatted = format_turkish_plate(plate_text)
-    steps.append(f"OCR: '{plate_text}' → Format: '{formatted}' (güven: {confidence:.2f})")
-    
+        # [YENİ] Klasik CV yedek dedektörü — YOLO'nun hiç göremediği
+        # plakaları morfolojik analiz ile bulur (aday kutu güveni 0
+        # yazılır; asıl doğrulama OCR + yapısal kurallardadır)
+        print(f"  [TESPİT] YOLO {pass_no} geçişte bulamadı → klasik CV dedektörü deneniyor...")
+        classical = detect_plate_classical(frame)
+        if classical:
+            valid_boxes = [(cx1, cy1, cx2, cy2, 0.0, car)
+                           for (cx1, cy1, cx2, cy2, _, car) in classical]
+            detection_source = "klasik"
+            print(f"    [KLASİK] {len(valid_boxes)} aday bölge bulundu")
+
+    if not valid_boxes:
+        print(f"  [SONUÇ] Plaka tespit EDİLEMEDİ (YOLO {pass_no} geçiş + klasik CV)!")
+        return {'file': filename, 'plate_text': None, 'formatted': '',
+                'confidence': 0.0, 'valid': False,
+                'steps': ['Plaka tespit edilemedi (YOLO + klasik CV)']}
+
+    # ─── ADIM 1.5: ADAY KUTU DÖNGÜSÜ ───  [YENİ]
+    # İlk aday her zaman doğru olmayabilir (özellikle klasik dedektörde).
+    # En fazla 3 aday sırayla işlenir:
+    # - Yapısal olarak GEÇERLİ + yeterli güvenli ilk sonuç kabul edilir
+    # - Hiçbiri geçerli değilse en yüksek OCR skorlu sonuç döner
+    best = None
+    for idx, box in enumerate(valid_boxes[:3], 1):
+        bx1, by1, bx2, by2, bconf, bar = box
+        print(f"  [ADAY {idx}/{min(3, len(valid_boxes))}] "
+              f"({bx1},{by1})-({bx2},{by2}) kaynak={detection_source} "
+              f"güven={bconf:.2f} AR={bar:.1f}")
+
+        tag = "" if idx == 1 else f"_aday{idx}"
+        result = process_plate_candidate(frame, box, reader, output_dir,
+                                         stem, save_debug, tag)
+        if result is None:
+            continue
+
+        result['steps'].insert(0, f"{detection_source} tespit #{idx} "
+                                  f"(güven: {bconf:.2f}, AR: {bar:.1f})")
+
+        if best is None or result['score'] > best['score']:
+            best = result
+
+        # Erken çıkış: yapısal geçerli + makul güvenli sonuç bulundu
+        if result['valid'] and result['confidence'] >= 0.30:
+            break
+
+    if best is None:
+        print(f"  [SONUÇ] Aday kutular işlenemedi!")
+        return {'file': filename, 'plate_text': None, 'formatted': '',
+                'confidence': 0.0, 'valid': False,
+                'steps': ['Aday kutular işlenemedi']}
+
+    plate_text = best['plate_text']
+    confidence = best['confidence']
+    formatted = best['formatted']
+    valid = best['valid']
+    steps = best['steps']
+
     print(f"\n  ┌─────────────────────────────────────┐")
     print(f"  │  SONUÇ: {formatted:>12}  ({confidence:.1%} güven)  │")
     print(f"  └─────────────────────────────────────┘")
-    
+
     return {
         'file': filename,
         'plate_text': plate_text,
         'formatted': formatted,
         'confidence': confidence,
+        'valid': valid,
         'steps': steps
     }
+    
 
 
 # =============================================================================
@@ -1304,22 +1991,31 @@ def log_results_to_csv(results, csv_path="plaka_log.csv", overwrite=True):
     """
     write_mode = 'w' if overwrite else 'a'
     file_exists = os.path.exists(csv_path) and not overwrite
-    
+    written_count = 0  # [YENİ] Gerçekten yazılan satır sayısı (filtre sonrası)
+
     with open(csv_path, mode=write_mode, newline='', encoding='utf-8-sig') as f:
         # utf-8-sig: Excel'in Türkçe karakterleri doğru göstermesi için BOM ekler
         writer = csv.writer(f)
-        
+
         if not file_exists:
             writer.writerow(["Plaka", "Tarih_Saat", "Guven_%"])
-        
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         for result in results:
             formatted  = result.get('formatted', '')
             confidence = result.get('confidence', 0.0)
-            
-            # Tespit edilemeyen plakaları atla — sadece okunan plakaları yaz
+            valid      = result.get('valid', False)
+
+            # [DEĞİŞTİ] KALİTE KAPISI: sadece güvenilir okumaları logla.
+            # 1. Yapısal olarak geçersiz okumalar çöp veridir ('06 J 003')
+            # 2. Geçerli görünse bile güveni %35'in altındaki okumalar
+            #    güvenilmezdir (tek zayıf stratejiden gelen yarı-doğru
+            #    okumalar: '06 ABL 328' gibi)
+            # CSV'ye yanlış kayıt yazmak hiç yazmamaktan kötüdür.
             if not formatted or confidence <= 0:
+                continue
+            if not valid or confidence < 0.35:
                 continue
             
             writer.writerow([
@@ -1327,8 +2023,13 @@ def log_results_to_csv(results, csv_path="plaka_log.csv", overwrite=True):
                 timestamp,                        # Tarih ve saat
                 f"{confidence * 100:.1f}",        # Güven % (örn. "87.4")
             ])
-    
-    print(f"\n[CSV] {len(results)} sonuç '{csv_path}' dosyasına yazıldı.")
+            written_count += 1
+
+    # [DEĞİŞTİ] Gerçek yazılan satır sayısını raporla (eski mesaj filtre
+    # edilenleri de sayıyordu — yanıltıcıydı)
+    skipped = len(results) - written_count
+    print(f"\n[CSV] {written_count} güvenilir okuma '{csv_path}' dosyasına yazıldı"
+          f"{f' ({skipped} düşük kaliteli sonuç filtrelendi)' if skipped else ''}.")
 
 
 
@@ -1342,24 +2043,36 @@ def print_summary_table(results):
     print(f"\n{'='*80}")
     print(f"{'PLAKA TESPİT SONUÇLARI':^80}")
     print(f"{'='*80}")
-    print(f"{'Dosya':<45} {'Plaka':<15} {'Güven':>8}")
-    print(f"{'-'*45} {'-'*15} {'-'*8}")
-    
+    print(f"{'Dosya':<45} {'Plaka':<15} {'Güven':>8} {'Format':>8}")
+    print(f"{'-'*45} {'-'*15} {'-'*8} {'-'*8}")
+
     success_count = 0
+    suspect_count = 0
     for r in results:
         formatted = r.get('formatted', '-')
         confidence = r.get('confidence', 0.0)
-        status = "✓" if formatted and formatted != '-' and confidence > 0.3 else "✗"
-        
-        if status == "✓":
+        valid = r.get('valid', False)
+        # [DEĞİŞTİ] Üç durumlu değerlendirme:
+        # ✓ = yapısal geçerli + yeterli güven (CSV'ye de yazılır)
+        # ? = yapısal geçerli ama düşük güven (şüpheli — CSV'ye yazılmaz)
+        # ✗ = geçersiz/okunamadı
+        if formatted and formatted != '-' and valid and confidence >= 0.35:
+            status = "✓"
             success_count += 1
-        
-        print(f"{status} {r['file']:<43} {formatted:<15} {confidence:>7.1%}")
-    
+        elif formatted and formatted != '-' and valid:
+            status = "?"
+            suspect_count += 1
+        else:
+            status = "✗"
+
+        valid_str = "GEÇERLİ" if valid else "-"
+        print(f"{status} {r['file']:<43} {formatted:<15} {confidence:>7.1%} {valid_str:>8}")
+
     print(f"{'-'*80}")
     print(f"  Toplam: {len(results)} görüntü | "
           f"Başarılı: {success_count} | "
-          f"Başarısız: {len(results) - success_count}")
+          f"Şüpheli: {suspect_count} | "
+          f"Başarısız: {len(results) - success_count - suspect_count}")
     print(f"{'='*80}")
 
 
