@@ -1001,6 +1001,14 @@ def read_plate_ocr(image_variants, reader):
     # zarar verdiğini gösterdi (gerekçe docstring madde 2)
     OCR_PARAMS = dict(allowlist=PLATE_ALLOWLIST, paragraph=False)
 
+    # ─── BAĞIMSIZ DENEME AŞAMASI ───
+    # 5 varyant (temiz/ham/sade/ince/gölge) × 2 strateji (renkli/otsu) =
+    # en fazla 10 TAMAMEN BAĞIMSIZ reader.readtext() çağrısı yapılır.
+    # Her biri kendi metnini/güvenini üretir, BİRBİRİNİN SONUCUNU GÖRMEZ.
+    # Birleştirme/karşılaştırma burada değil, aşağıda (ADIM 1-3'te) TÜM
+    # adaylar toplandıktan SONRA tek seferde yapılır — bağımsızlık şart,
+    # çünkü varyant AİLESİ konsensüsü (aşağıda) ancak denemeler birbirini
+    # etkilemediyse anlamlıdır.
     candidates = []
 
     for variant_label, variant_image in image_variants:
@@ -1066,7 +1074,8 @@ def read_plate_ocr(image_variants, reader):
     # (inceltilmiş) varyant ayrı ailedir; yalnız FARKLI ailelerin
     # uzlaşması gerçek bağımsız doğrulamadır.
     def variant_family(strategy):
-        return "ince" if strategy.startswith("ince") else "kalın"
+        # "gölge" varyantı da inceltilmiş ailedendir (aynı dilasyon işlemi)
+        return "ince" if strategy.startswith(("ince", "gölge")) else "kalın"
 
     format_families = {}
     for p in processed:
@@ -1110,12 +1119,23 @@ def read_plate_ocr(image_variants, reader):
 
         # Altdizi bonusu — bu geçerli aday, başka bir geçerli adayı
         # altdizi olarak kapsıyorsa (karakter düşmesini telafi)
+        # [DEĞİŞTİ] EK KOŞUL: uzun adayın aile desteği, kapsadığı kısa
+        # adayınkinden az OLMAMALI. Gerçek hata: gölge varyantı TR bandı
+        # kalıntısından sahte 'S' ekleyip '34SN5953' üretti (tek aile);
+        # doğru okuma '34N5953' 2 aileden destekliydi ama altdizi bonusu
+        # sahte eklemeyi ödüllendirip yanlışı kazandırdı. Karakter
+        # düşmesi telafisi ancak uzun okuma en az kısa okuma kadar
+        # bağımsız kanıta sahipse güvenilirdir.
         if p['valid']:
             my_clean = p['formatted'].replace(" ", "")
+            my_fams = len(format_families.get(p['formatted'], set()))
             for q in processed:
                 if q['valid'] and q is not p:
                     other = q['formatted'].replace(" ", "")
-                    if len(other) < len(my_clean) and _is_subsequence(other, my_clean):
+                    other_fams = len(format_families.get(q['formatted'], set()))
+                    if (len(other) < len(my_clean)
+                            and _is_subsequence(other, my_clean)
+                            and my_fams >= other_fams):
                         score += 0.25
                         break
 
@@ -1131,6 +1151,108 @@ def read_plate_ocr(image_variants, reader):
         print(f"           {p['strategy']:>14}: '{p['text']}' → '{p['formatted']}' "
               f"[{valid_str}, onarım:{p['cost']}] (güven: {p['conf']:.2f}, "
               f"skor: {score:.2f}){marker}")
+
+    # ─── YABANCI PLAKA GÜVENLİK KONTROLÜ ───  [YENİ]
+    # SORUN: Türk allowlist'i W/Q/X harflerini içermez (Türk plakasında
+    # kullanılmazlar). Alman "WI TJ 473" plakası bu yüzden yanlış okunur
+    # ve onarım mekanizması onu zorla geçerli Türk plakasına dönüştürür
+    # ('16 TJ 473') → kendinden emin SAHTE kayıt üretilir!
+    # ÇÖZÜM: Sonuç "geçerli Türk plakası" çıktıysa, TAM alfabeyle
+    # (W/Q/X dahil) bir doğrulama okuması yap. Ana metin satırında
+    # yeterli güvenle W/Q/X görülüyorsa plaka Türk OLAMAZ → YABANCI
+    # olarak işaretle ve Türk plakası diye kaydetme.
+    # (Deney: Alman plakada tam alfabe 'WI'=%92, TR alfabe 'HI'=%65)
+    if best['valid']:
+        FULL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        # [DEĞİŞTİ] Kontrol artık TÜM varyantlarda yapılır. Tek varyant
+        # yanıltıcıydı: kazanan varyant Alman plakayı 'W6T1277' okurken
+        # 'sade' varyantı doğru 'WI TJ473' okuyordu. Her varyantın ana
+        # metin satırı (yükseklik + güven filtresiyle) ayrı çıkarılır.
+        foreign_readings = []  # (varyant, boşluklu, bitişik, güven)
+        for lbl, img in image_variants:
+            try:
+                fr = reader.readtext(img, allowlist=FULL_ALPHABET,
+                                     paragraph=False)
+            except Exception:
+                continue
+            frags = [(bbox, t.replace(' ', '').upper(), c)
+                     for bbox, t, c in fr if t.strip()]
+            if not frags:
+                continue
+            heights = [max(p[1] for p in b) - min(p[1] for p in b)
+                       for b, _, _ in frags]
+            h_max = max(heights)
+            main = [(b, t, c) for (b, t, c), h in zip(frags, heights)
+                    if h >= 0.45 * h_max and c >= 0.25]
+            if not main:
+                continue
+            main.sort(key=lambda f: min(p[0] for p in f[0]))
+            joined = ''.join(t for _, t, _ in main)
+            spaced = ' '.join(t for _, t, _ in main)
+            conf = (sum(c * len(t) for _, t, c in main)
+                    / max(1, sum(len(t) for _, t, _ in main)))
+            foreign_readings.append((lbl, spaced, joined, conf))
+
+        # Yabancı kanıtı: W/Q/X EN AZ 2 varyantta görülmeli.
+        # [DEĞİŞTİ] Tek varyant istisnası (≥0.60 güven) kaldırıldı —
+        # gerçek hata: Türk '06 AB 8655' plakasında tek varyant A'yı W
+        # okudu (0.67) ve plaka yanlışlıkla YABANCI işaretlendi. Gerçek
+        # yabancı plakada W/Q/X birden çok varyantta tutarlı görünür
+        # (Alman plaka deneyi: 4/5 varyant); tek varyantlık W/Q/X ise
+        # hayalet okumadır.
+        qwx_hits = [(lbl, c) for lbl, _, t, c in foreign_readings
+                    if any(ch in t for ch in 'QWX')]
+        is_foreign = len(qwx_hits) >= 2
+
+        if is_foreign:
+            # Metin seçimi: dilasyonsuz (kalın) varyantlar öncelikli —
+            # ince/gölge varyantlarındaki dilasyon, AB plakasının mavi
+            # bandından hayalet harf üretebiliyor ('G' gibi).
+            kalin_pool = [r for r in foreign_readings
+                          if variant_family(r[0]) == 'kalın'
+                          and any(ch in r[2] for ch in 'QWX')]
+            pool = kalin_pool or [r for r in foreign_readings
+                                  if any(ch in r[2] for ch in 'QWX')]
+            pool.sort(key=lambda r: r[3], reverse=True)
+            _, spaced, joined, fconf = pool[0]
+            print(f"    [YABANCI] Tam alfabe okuması '{spaced}' "
+                  f"(güven: {fconf:.2f}, {len(qwx_hits)} varyantta W/Q/X) → "
+                  f"Türk plakası DEĞİL, kayıt Türk formatına zorlanmadı!")
+            # Yabancı okuma metnini göster, geçersiz işaretle
+            # (valid=False → CSV kalite kapısı bunu loglamaz)
+            return joined, fconf, f"{spaced} [YABANCI]", False, 0.0
+
+    # ─── TEK KAYNAK GÜVENCESİ ───  [YENİ]
+    # Kazanan okuma yalnızca TEK varyant ailesinden destek alıyorsa ve
+    # güveni orta seviyedeyse (< 0.60), sonuç "şüpheli" bandına indirilir
+    # (güven 0.30 olarak raporlanır → özet tablosunda '?' işareti alır,
+    # CSV kalite kapısından geçemez).
+    # NEDEN? Gölgeli/bozuk plakalarda tek bir varyant yapısal olarak
+    # geçerli ama YANLIŞ okuma üretebilir (gerçek hata: gölgedeki
+    # '34 JA 8191' plakası tek kaynaktan '34 JLB 191' okundu, %46
+    # güvenle kalite kapısını geçip CSV'ye yanlış kayıt olarak girdi).
+    # Bağımsız doğrulaması olmayan orta güvenli okuma iddia edilmemeli.
+    if best['valid']:
+        family_support = len(format_families.get(best['formatted'], set()))
+        if family_support <= 1 and best['conf'] < 0.60:
+            print(f"    [ŞÜPHELİ] '{best['formatted']}' tek varyant ailesinden "
+                  f"(güven: {best['conf']:.2f} < 0.60) → şüpheli olarak işaretlendi")
+            return best['text'], 0.30, best['formatted'], True, best_score
+
+    # ─── YABANCI ETİKETİ STANDARDİZASYONU ───  [YENİ]
+    # Türk plaka formatına uymayan her OKUNABİLİR sonuç tutarlı biçimde
+    # [YABANCI] etiketi taşır — W/Q/X kanıtı olsun (yukarıdaki kontrol)
+    # ya da olmasın ('SNIP3R' gibi süs/yabancı plakalar W/Q/X içermez ama
+    # Türk plakası da değildir). Ayrım güvenle yapılır:
+    #   - geçersiz + güven ≥ 0.40 → net okunmuş ama Türk formatı değil
+    #     = YABANCI
+    #   - geçersiz + güven < 0.40 → muhtemelen kötü okunmuş bir plaka
+    #     = "okunamadı" (yabancı İDDİA EDİLMEZ, Türk plakası olabilir)
+    if not best['valid'] and best['conf'] >= 0.40:
+        print(f"    [YABANCI] '{best['formatted']}' Türk formatına uymuyor "
+              f"ama net okundu (güven: {best['conf']:.2f}) → YABANCI etiketi")
+        return (best['text'], best['conf'],
+                f"{best['formatted']} [YABANCI]", False, best_score)
 
     return best['text'], best['conf'], best['formatted'], best['valid'], best_score
 
@@ -1364,9 +1486,9 @@ def format_turkish_plate(raw_text):
 
 def detect_plate_boxes(model, frame, device):
     """
-    [YENİ FONKSİYON — TESPİT HATALARININ ANA ÇÖZÜMÜ]
+    [TESPİT HATALARININ ANA ÇÖZÜMÜ]
 
-    ESKİ KODDAKİ SORUN:
+    ESKİ SORUN:
     model.predict() varsayılan imgsz=640 ile çalışıyordu. 2048x1536 gibi
     yüksek çözünürlüklü fotoğraflar YOLO'ya girmeden önce 640px'e
     küçültülüyordu → plaka görüntüde 15-25 piksele düşüyordu → model
@@ -1383,8 +1505,16 @@ def detect_plate_boxes(model, frame, device):
        Düşük eşiğin riski yok: geometri filtresi + OCR yapısal
        doğrulaması yanlış tespitleri zaten eler.
 
-    Çoğu görüntü 1. geçişte bulunur (ek maliyet yok). Sadece tespit
-    başarısız olursa diğer geçişlere düşülür.
+    [DEĞİŞTİ] ERKEN ÇIKIŞ KALDIRILDI — artık TÜM geçişler çalışır ve
+    kutular birleştirilir (IoU tekilleştirmesi ile). NEDEN? Gerçek hata:
+    yakın çekim SNIP3R fotoğrafında 1. geçiş (1280) plakayı değil,
+    çerçevenin "#FeelTheMPower" yazı şeridini kutuladı ve erken çıkış
+    yüzünden 640 geçişine hiç sıra gelmedi — oysa gerçek plaka (görüntünün
+    %73'ü genişliğinde, çok büyük) yalnızca küçük imgsz'de bulunuyordu
+    (320px'te güven 0.92). Büyük/yakın plakalar küçük ölçekte, küçük/uzak
+    plakalar büyük ölçekte görünür; ikisini de yakalamak için geçişlerin
+    tamamı gerekir. Yanlış kutular (yazı şeridi gibi) güven sıralamasında
+    geriye düşer ve OCR yapısal doğrulamasında zaten elenir.
 
     Parametreler:
         model: YOLO model nesnesi
@@ -1411,6 +1541,9 @@ def detect_plate_boxes(model, frame, device):
         {"imgsz": 640,  "conf": 0.03},
     ]
 
+    all_boxes = []  # tüm geçişlerden toplanan aday kutular
+    first_hit_pass = 0
+
     for pass_no, params in enumerate(detection_passes, 1):
         results = model.predict(source=frame, device=device, verbose=False, **params)
         boxes = results[0].boxes
@@ -1419,7 +1552,7 @@ def detect_plate_boxes(model, frame, device):
                   f"conf={params['conf']}): tespit yok")
             continue
 
-        valid_boxes = []
+        pass_count = 0
         for i in range(len(boxes)):
             bx1, by1, bx2, by2 = map(int, boxes[i].xyxy[0])
             bw, bh = bx2 - bx1, by2 - by1
@@ -1431,18 +1564,50 @@ def detect_plate_boxes(model, frame, device):
             ar = bw / bh
             if (PLATE_AR_MIN <= ar <= PLATE_AR_MAX and
                     bw >= MIN_WIDTH and bh >= MIN_HEIGHT):
-                valid_boxes.append((bx1, by1, bx2, by2, bconf, ar))
+                all_boxes.append((bx1, by1, bx2, by2, bconf, ar))
+                pass_count += 1
 
-        if valid_boxes:
-            # En güvenilir kutu önce
-            valid_boxes.sort(key=lambda b: b[4], reverse=True)
-            print(f"    [TESPİT] Geçiş {pass_no} (imgsz={params['imgsz']}): "
-                  f"{len(valid_boxes)} geçerli plaka bulundu")
-            return valid_boxes, pass_no
+        if pass_count and not first_hit_pass:
+            first_hit_pass = pass_no
+        print(f"    [TESPİT] Geçiş {pass_no} (imgsz={params['imgsz']}): "
+              f"{pass_count} geçerli kutu")
 
-        print(f"    [TESPİT] Geçiş {pass_no}: tespitler geometri filtresine takıldı")
+    if not all_boxes:
+        return [], len(detection_passes)
 
-    return [], len(detection_passes)
+    # ─── KUTU TEKİLLEŞTİRME ───
+    # Aynı plaka farklı ölçek geçişlerinde tekrar bulunur; örtüşen
+    # kutulardan en güvenilir olan tutulur. İki kutu şu durumda aynı
+    # sayılır: IoU > 0.5 VEYA küçük kutunun %85'i büyüğün içinde
+    # (iç içe tespit — sıkı kutu vs gevşek kutu).
+    def _overlap(a, b):
+        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+        ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        inter = iw * ih
+        if inter == 0:
+            return 0.0, 0.0
+        area_a = (a[2] - a[0]) * (a[3] - a[1])
+        area_b = (b[2] - b[0]) * (b[3] - b[1])
+        iou = inter / (area_a + area_b - inter)
+        containment = inter / min(area_a, area_b)
+        return iou, containment
+
+    all_boxes.sort(key=lambda b: b[4], reverse=True)  # en güvenilir önce
+    valid_boxes = []
+    for box in all_boxes:
+        duplicate = False
+        for kept in valid_boxes:
+            iou, cont = _overlap(box, kept)
+            if iou > 0.5 or cont > 0.85:
+                duplicate = True
+                break
+        if not duplicate:
+            valid_boxes.append(box)
+
+    print(f"    [TESPİT] Birleştirme: {len(all_boxes)} kutu → "
+          f"{len(valid_boxes)} tekil plaka adayı")
+    return valid_boxes, first_hit_pass
 
 
 def detect_plate_classical(frame, max_candidates=3):
@@ -1558,7 +1723,7 @@ def detect_plate_classical(frame, max_candidates=3):
 
 def rectify_plate(plate_crop):
     """
-    [YENİ FONKSİYON — EĞİK PLAKALARI DÜZLEŞTİRME]
+    [EĞİK PLAKALARI DÜZLEŞTİRME]
 
     NEDEN GEREKLİ?
     Araç fotoğrafları nadiren tam karşıdan çekilir. Eğik plakalarda
@@ -1725,7 +1890,10 @@ def process_plate_candidate(frame, box, reader, output_dir, stem, save_debug, ta
     if save_debug and output_dir:
         cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_05_no_frame.jpg"), current)
 
-    # ─── DÖRT GÖRÜNTÜ VARYANTI HAZIRLA ───  [DEĞİŞTİ]
+    # ─── BEŞ GÖRÜNTÜ VARYANTI HAZIRLA ───  [DEĞİŞTİ]
+    # Aşağıdaki 5 varyant (temiz/ham/sade/ince/gölge) burada sadece
+    # ÜRETİLİR — her biri read_plate_ocr() içinde BİRBİRİNDEN BAĞIMSIZ
+    # olarak OCR'a sokulacak (bkz. read_plate_ocr başındaki not).
     print(f"  [6/7] Görüntü iyileştirme (4 varyant hazırlanıyor)...")
     enhanced_clean = enhance_plate_for_ocr(current)      # "temiz"
     enhanced_raw = enhance_plate_for_ocr(rectified)      # "ham"
@@ -1748,20 +1916,46 @@ def process_plate_candidate(frame, box, reader, output_dir, stem, save_debug, ta
                          interpolation=cv2.INTER_CUBIC)
     thinned = cv2.dilate(gray_up, np.ones((3, 3), np.uint8), iterations=2)
 
-    steps.append("OCR iyileştirme uygulandı (temiz + ham + sade + ince varyantları)")
+    # "gölge": AYDINLATMA DÜZLEŞTİRME + büyütme + inceltme  [YENİ]
+    # NEDEN? Ağaç gölgesi gibi benekli/dengesiz aydınlatma plakayı
+    # kısmen karartır — global ve CLAHE kontrast bile yetmez, OCR hiç
+    # okuyamaz (gerçek hata: arabalar.jpeg'deki '34 JA 8191').
+    # ÇÖZÜM: Arka plan aydınlatmasını morfolojik KAPAMA ile kestir
+    # (51x51'e denk gelen 31x31 kernel karakterleri siler, geriye sadece
+    # yavaş değişen aydınlatma haritası kalır) ve görüntüyü bu haritaya
+    # BÖL → gölge deseni sadeleşir, karakterler eşit kontrasta gelir.
+    # Deney: gölgeli plaka hiç okunamazken bu varyantla '34JL0191'
+    # (güven 0.49) seviyesine çıktı.
+    # Kapama (dilate+erode) büyük 31x31 çekirdekle karakterleri SİLER,
+    # geriye yalnızca kaba/yavaş-değişen aydınlatma haritası kalır
+    # (flat_bg = "bu bölge genel olarak ne kadar parlak"). Orijinali bu
+    # haritaya BÖLMEK, her pikseli KENDİ yerel referansına göre
+    # değerlendirir → gölgedeki koyu zemin ile aydınlıktaki koyu zemin
+    # bölme sonrası aynı göreli değere gelir, gölge deseni pratikte iptal olur.
+    flat_bg = cv2.morphologyEx(gray_crop, cv2.MORPH_CLOSE,
+                               cv2.getStructuringElement(cv2.MORPH_RECT, (31, 31)))
+    flat = cv2.divide(gray_crop, flat_bg, scale=255)
+    flat = cv2.normalize(flat, None, 0, 255, cv2.NORM_MINMAX)  # bölme sonrası dar kalan kontrastı 0-255'e yay
+    golge_scale = min(max(160.0 / max(gray_crop.shape[0], 1), 1.0), 8.0)
+    golge = cv2.resize(flat, None, fx=golge_scale, fy=golge_scale,
+                       interpolation=cv2.INTER_CUBIC)
+    golge = cv2.dilate(golge, np.ones((3, 3), np.uint8), iterations=1)
+
+    steps.append("OCR iyileştirme uygulandı (temiz + ham + sade + ince + gölge varyantları)")
     if save_debug and output_dir:
         cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06_enhanced.jpg"), enhanced_clean)
         cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06b_enhanced_raw.jpg"), enhanced_raw)
         cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06c_plain4x.jpg"), plain_4x)
         cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06d_thinned.jpg"), thinned)
+        cv2.imwrite(os.path.join(output_dir, f"{stem}{tag}_06e_golge.jpg"), golge)
 
     # ─── OCR OKUMA ───  [DEĞİŞTİ]
     # read_plate_ocr formatlama + doğrulama + skorlamayı içerir;
     # en iyi aday güven + yapısal geçerlilik + konsensüs ile seçilir
-    print(f"  [7/7] OCR okuma (4 varyant × 2 strateji + oylama)...")
+    print(f"  [7/7] OCR okuma (5 varyant × 2 strateji + oylama)...")
     plate_text, confidence, formatted, valid, score = read_plate_ocr(
         [("temiz", enhanced_clean), ("ham", enhanced_raw),
-         ("sade", plain_4x), ("ince", thinned)],
+         ("sade", plain_4x), ("ince", thinned), ("gölge", golge)],
         reader
     )
 
@@ -1854,15 +2048,14 @@ def process_single_image(image_path, model, reader, output_dir=None, save_debug=
                 'confidence': 0.0, 'valid': False,
                 'steps': ['Plaka tespit edilemedi (YOLO + klasik CV)']}
 
-    # ─── ADIM 1.5: ADAY KUTU DÖNGÜSÜ ───  [YENİ]
-    # İlk aday her zaman doğru olmayabilir (özellikle klasik dedektörde).
-    # En fazla 3 aday sırayla işlenir:
-    # - Yapısal olarak GEÇERLİ + yeterli güvenli ilk sonuç kabul edilir
-    # - Hiçbiri geçerli değilse en yüksek OCR skorlu sonuç döner
-    best = None
-    for idx, box in enumerate(valid_boxes[:3], 1):
+    # ─── ADIM 1.5: ADAY KUTU DÖNGÜSÜ ───  [YENİ: ÇOKLU PLAKA DESTEĞİ]
+    # Tespit edilen aday kutuların tamamı sırayla işlenir (en fazla 5 aday)
+    max_process_boxes = 5
+    processed_candidates = []
+    
+    for idx, box in enumerate(valid_boxes[:max_process_boxes], 1):
         bx1, by1, bx2, by2, bconf, bar = box
-        print(f"  [ADAY {idx}/{min(3, len(valid_boxes))}] "
+        print(f"\n  [ADAY {idx}/{min(max_process_boxes, len(valid_boxes))}] "
               f"({bx1},{by1})-({bx2},{by2}) kaynak={detection_source} "
               f"güven={bconf:.2f} AR={bar:.1f}")
 
@@ -1874,38 +2067,55 @@ def process_single_image(image_path, model, reader, output_dir=None, save_debug=
 
         result['steps'].insert(0, f"{detection_source} tespit #{idx} "
                                   f"(güven: {bconf:.2f}, AR: {bar:.1f})")
+        processed_candidates.append(result)
 
-        if best is None or result['score'] > best['score']:
-            best = result
+    # ─── ADIM 1.6: FİLTRELEME VE SONUÇ SENTEZİ ───
+    # Kalite kapısından geçen (geçerli formatta ve makul güvenli) plakaları ayır
+    good_results = [r for r in processed_candidates if r['valid'] and r['confidence'] >= 0.30]
 
-        # Erken çıkış: yapısal geçerli + makul güvenli sonuç bulundu
-        if result['valid'] and result['confidence'] >= 0.30:
-            break
+    final_results = []
+    
+    if good_results:
+        # En az bir geçerli plaka bulunduysa, sadece geçerli olanların tümünü döndür
+        print(f"\n  [SONUÇ] {len(good_results)} geçerli plaka okundu:")
+        for r in good_results:
+            print(f"  ┌─────────────────────────────────────┐")
+            print(f"  │  PLAKA: {r['formatted']:>12}  ({r['confidence']:.1%} güven)  │")
+            print(f"  └─────────────────────────────────────┘")
+            final_results.append({
+                'file': filename,
+                'plate_text': r['plate_text'],
+                'formatted': r['formatted'],
+                'confidence': r['confidence'],
+                'valid': r['valid'],
+                'steps': r['steps']
+            })
+    else:
+        # Hiçbir aday geçerli plaka vermediyse, en yüksek skorlu olanı başarısız/okunamadı olarak dön
+        if processed_candidates:
+            best = max(processed_candidates, key=lambda x: x['score'])
+            print(f"\n  [SONUÇ] Geçerli plaka formatında okuma yapılamadı (En iyi aday: {best['formatted']} %{best['confidence']:.1%})")
+            final_results.append({
+                'file': filename,
+                'plate_text': best['plate_text'],
+                'formatted': best['formatted'],
+                'confidence': best['confidence'],
+                'valid': best['valid'],
+                'steps': best['steps']
+            })
+        else:
+            # Hiçbir aday işlenemediyse default boş sonuç dön
+            print(f"\n  [SONUÇ] Aday kutular işlenemedi!")
+            final_results.append({
+                'file': filename,
+                'plate_text': None,
+                'formatted': '',
+                'confidence': 0.0,
+                'valid': False,
+                'steps': ['Aday kutular işlenemedi']
+            })
 
-    if best is None:
-        print(f"  [SONUÇ] Aday kutular işlenemedi!")
-        return {'file': filename, 'plate_text': None, 'formatted': '',
-                'confidence': 0.0, 'valid': False,
-                'steps': ['Aday kutular işlenemedi']}
-
-    plate_text = best['plate_text']
-    confidence = best['confidence']
-    formatted = best['formatted']
-    valid = best['valid']
-    steps = best['steps']
-
-    print(f"\n  ┌─────────────────────────────────────┐")
-    print(f"  │  SONUÇ: {formatted:>12}  ({confidence:.1%} güven)  │")
-    print(f"  └─────────────────────────────────────┘")
-
-    return {
-        'file': filename,
-        'plate_text': plate_text,
-        'formatted': formatted,
-        'confidence': confidence,
-        'valid': valid,
-        'steps': steps
-    }
+    return final_results
     
 
 
@@ -1964,8 +2174,8 @@ def process_all_images(folder_path, model, reader, save_debug=True):
     all_results = []
     for i, image_path in enumerate(image_files, 1):
         print(f"\n[{i}/{len(image_files)}] ", end="")
-        result = process_single_image(image_path, model, reader, output_dir, save_debug)
-        all_results.append(result)
+        results = process_single_image(image_path, model, reader, output_dir, save_debug)
+        all_results.extend(results)
     
     return all_results
 
@@ -2108,9 +2318,9 @@ if __name__ == "__main__":
         for img in fallback_images:
             if os.path.exists(img):
                 print(f"Tek görüntü işleniyor: {img}")
-                result = process_single_image(img, model, reader, "sonuclar", True)
-                print_summary_table([result])
-                log_results_to_csv([result])
+                results = process_single_image(img, model, reader, "sonuclar", True)
+                print_summary_table(results)
+                log_results_to_csv(results)
                 break
         else:
             print("[HATA] İşlenecek görüntü bulunamadı!")
