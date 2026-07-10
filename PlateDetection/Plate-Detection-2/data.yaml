@@ -1,0 +1,12 @@
+names:
+- '0'
+nc: 1
+roboflow:
+  license: CC BY 4.0
+  project: plate-detection-vh2rk
+  url: https://universe.roboflow.com/guler-kandeger/plate-detection-vh2rk/dataset/2
+  version: 2
+  workspace: guler-kandeger
+test: ../test/images
+train: ../train/images
+val: ../valid/images

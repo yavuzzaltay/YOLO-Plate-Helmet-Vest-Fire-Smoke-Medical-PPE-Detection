@@ -1,7 +1,26 @@
+# Environments
 .venv/
+PlateDetection/.venv/
+
+# IDE and Tool Configurations
 .vscode/
-__pycache__/
-runs/
-*.pt
-*.mp4
-arabalar/sonuclar/
+.claude/
+.streamlit/
+
+# Python Cache
+**/__pycache__/
+
+# Weights (YOLO models - too large for GitHub)
+**/*.pt
+
+# Media and Video files
+**/*.mp4
+**/*.webm
+**/*.avi
+**/*.mov
+**/*.mkv
+
+# Temp and Run outputs
+PlateDetection/runs/
+PlateDetection/arabalar/sonuclar/
+PlateDetection/cikti_video/

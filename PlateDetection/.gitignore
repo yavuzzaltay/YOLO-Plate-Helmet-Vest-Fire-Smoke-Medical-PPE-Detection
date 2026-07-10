@@ -1,0 +1,7 @@
+.venv/
+.vscode/
+__pycache__/
+runs/
+*.pt
+*.mp4
+arabalar/sonuclar/
