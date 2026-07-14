@@ -30,12 +30,15 @@ BASE_DIR = Path(__file__).resolve().parent
 try:
     PLATE_DIR = Path(os.path.relpath(BASE_DIR / "PlateDetection", os.getcwd()))
     VEST_DIR = Path(os.path.relpath(BASE_DIR / "VestAndPlateDetection", os.getcwd()))
+    FIRE_DIR = Path(os.path.relpath(BASE_DIR / "FireAndSmoke", os.getcwd()))
 except Exception:
     PLATE_DIR = Path("PlateDetection")
     VEST_DIR = Path("VestAndPlateDetection")
+    FIRE_DIR = Path("FireAndSmoke")
 
 sys.path.insert(0, str(PLATE_DIR))
 sys.path.insert(0, str(VEST_DIR))
+sys.path.insert(0, str(FIRE_DIR))
 
 st.set_page_config(page_title="İyex Tespit Demo", layout="wide")
 
@@ -180,6 +183,19 @@ def load_plate_pipeline():
 def load_vest_model():
     from ultralytics import YOLO
     return YOLO(str(VEST_DIR / "best.pt"))
+
+
+@st.cache_resource(show_spinner="Yangın/duman modeli yükleniyor...")
+def load_fire_model():
+    """FireAndSmoke/runs/detect altındaki EN SON eğitimin best.pt'sini yükler.
+
+    Modeli bir kez yükleyip cache'liyoruz; her izleme oturumu için yeni bir
+    YanginDumanIzleyici kurulur ama hepsi bu tek model nesnesini paylaşır
+    (izleyici kurulurken tracker hafızası sıfırlanır, detay FireAndSmokeVideo.py'de).
+    """
+    from ultralytics import YOLO
+    from FireAndSmokeDetection import find_latest_best_weights
+    return YOLO(find_latest_best_weights())
 
 
 # ─────────────────────────── PLAKA: GÖRSEL İŞLEME ───────────────────────────
@@ -469,12 +485,98 @@ def run_vest_video(video_path, vest_model, conf, max_seconds, frame_ph, status_p
     st.success(f"{kaynak} işleme tamamlandı — {violation_frames} karede ihlal tespit edildi.")
 
 
+# ─────────────────────────── YANGIN & DUMAN: VİDEO ───────────────────────────
+
+def run_fire_video(video_path, izleyici, max_seconds, frame_ph, status_ph, table_ph, csv_path, frame_skip=5, live=False):
+    """Video/canlı akışta yangın-duman izleme döngüsü.
+
+    Kare okuma/örnekleme iskeleti run_vest_video ile birebir aynı (grab/retrieve,
+    canlıda zaman bazlı örnekleme, dosyada kare atlama). Fark: her örnek kare
+    FireAndSmokeVideo.YanginDumanIzleyici'ye verilir; o da takip (track) +
+    N-of-M zamansal onay + kanıt fotoğrafı/CSV işlerini kendi içinde halleder.
+    Alarm/bildirim yoktur — onaylanan olaylar sadece kaydedilir ve tabloda görünür.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        st.error("Video açılamadı." if not live else
+                 "Kameraya bağlanılamadı — telefon ve PC aynı Wi-Fi ağında mı? Adres doğru mu?")
+        return
+
+    if live:
+        # Canlı akışta tamponu küçült — eski kare birikmesin (detaylı
+        # açıklama run_plate_video içinde)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_no = -1
+    sample_idx = 0
+    olay_sayisi = 0
+    t0 = time.time()
+
+    # Canlı modda zaman tabanlı örnekleme (run_plate_video ile aynı mantık)
+    SAMPLE_PERIOD = 0.25
+    last_sample = -SAMPLE_PERIOD
+
+    def refresh_table():
+        try:
+            table_ph.dataframe(pd.read_csv(csv_path), width='stretch')
+        except (pd.errors.EmptyDataError, FileNotFoundError):
+            pass
+
+    try:
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            if live:
+                video_sec = time.time() - t0
+                if video_sec > max_seconds:
+                    break
+                if video_sec - last_sample < SAMPLE_PERIOD:
+                    continue
+                last_sample = video_sec
+            else:
+                frame_no += 1
+                if frame_no / fps > max_seconds:
+                    break
+                if frame_no % frame_skip != 0:
+                    continue
+                video_sec = frame_no / fps
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            sample_idx += 1
+
+            # Tüm izleme zekâsı (track + N-of-M + kanıt kaydı) tek çağrıda:
+            cizili, yeni_olaylar = izleyici.kare_isle(frame, video_sec)
+            if yeni_olaylar:
+                olay_sayisi += len(yeni_olaylar)
+                refresh_table()
+
+            proc_fps = sample_idx / max(0.1, time.time() - t0)
+            cizili = _draw_corner_info(cizili, proc_fps)
+            frame_ph.image(cv2.cvtColor(cizili, cv2.COLOR_BGR2RGB), channels="RGB")
+            ozet = izleyici.durum_ozeti()
+            sure_metni = f"{video_sec:5.1f}s" if live else f"{video_sec:5.1f}s / {max_seconds:.0f}s"
+            status_ph.text(
+                f"Video: {sure_metni}   |   aktif iz: {ozet['aktif_iz']}   |   "
+                f"onaylı olay: {olay_sayisi}"
+            )
+    finally:
+        cap.release()
+
+    kaynak = "Canlı yayın" if live else "Video"
+    st.success(f"{kaynak} işleme tamamlandı — {olay_sayisi} onaylı yangın/duman olayı kaydedildi.")
+
+
 # ═══════════════════════════════════════ ARAYÜZ ═══════════════════════════════════════
 
 st.title("İyex Tespit Demo")
 st.caption("Plaka okuma ve baret/yelek tespiti modellerini tarayıcıdan deneyin.")
 
-tab_plate, tab_vest = st.tabs(["🚗 Plaka Tespiti", "🦺 Baret & Yelek Tespiti"])
+tab_plate, tab_vest, tab_fire = st.tabs(
+    ["🚗 Plaka Tespiti", "🦺 Baret & Yelek Tespiti", "🔥 Yangın & Duman Tespiti"]
+)
 
 # ───────────────────────────────── PLAKA TESPİTİ SEKMESİ ─────────────────────────────────
 with tab_plate:
@@ -743,3 +845,125 @@ with tab_vest:
                     csv_path=str(VEST_DIR / "ihlal_log.csv"),
                     live=is_live_v,
                 )
+
+
+# ───────────────────────────────── YANGIN & DUMAN SEKMESİ ─────────────────────────────────
+with tab_fire:
+    st.info(
+        "YOLO11 tabanlı yangın/duman modeli. Videoda tespitler ByteTrack ile takip edilir "
+        "ve N-of-M zamansal filtreden geçer: bir bölge son M kontrol karesinin en az N'inde "
+        "görülürse 'ONAYLI' sayılır (tek karelik yansıma/parıltı yanlış alarmları böyle elenir). "
+        "Onaylanan her olay için anotasyonlu kanıt fotoğrafı FireAndSmoke/YanginKayitlari/ "
+        "klasörüne, olay satırı yangin_olay_log.csv'ye yazılır. Ekranda ince sarı kutu = aday, "
+        "kalın kırmızı/turuncu kutu = onaylı yangın/duman."
+    )
+    # Sınıf bazlı eşikler: duman doğası gereği düşük skor aldığı için eşiği
+    # düşük, ateş parlak/turuncu nesnelerle karışabildiği için eşiği yüksek.
+    col_f, col_s = st.columns(2)
+    fire_conf = col_f.slider("Ateş (fire) güven eşiği", 0.1, 0.9, 0.45, 0.05, key="fire_conf")
+    smoke_conf = col_s.slider("Duman (smoke) güven eşiği", 0.1, 0.9, 0.30, 0.05, key="smoke_conf")
+
+    sub_img_f, sub_video_f = st.tabs(["Görsel", "Video (gerçek zamanlı)"])
+
+    with sub_img_f:
+        st.subheader("Görselde yangın/duman tespiti")
+        uploaded_fi = st.file_uploader("Görsel yükle", type=sorted(e.strip(".") for e in IMAGE_EXTS), key="fire_img_upload")
+        image_path_f = None
+        if uploaded_fi is not None:
+            ok, msg = validate_image_upload(uploaded_fi)
+            if not ok:
+                st.error(msg)
+            else:
+                image_path_f = save_upload_to_temp(uploaded_fi)
+                st.image(image_path_f, caption="Yüklenen görsel", width=400)
+
+        if image_path_f and st.button("Tespit Et", key="fire_img_run"):
+            from FireAndSmokeVideo import fotograf_isle
+            fire_model = load_fire_model()
+            frame_f = cv2.imread(image_path_f)
+            with st.spinner("İşleniyor..."):
+                annotated_f, counts_f = fotograf_isle(
+                    fire_model, frame_f,
+                    esikler={"fire": fire_conf, "smoke": smoke_conf},
+                )
+            st.image(cv2.cvtColor(annotated_f, cv2.COLOR_BGR2RGB), caption="Tespit sonucu", width='stretch')
+            st.write(counts_f if counts_f else "Yangın/duman tespit edilmedi.")
+
+    with sub_video_f:
+        st.subheader("Videoda gerçek zamanlı yangın/duman izleme")
+        source_f = st.radio(
+            "Kaynak",
+            ["Video yükle", "Telefon kamerası (IP Webcam)"],
+            key="fire_vid_source",
+        )
+
+        video_path_f = None
+        is_live_f = False
+        if source_f == "Video yükle":
+            uploaded_fv = st.file_uploader("Video yükle", type=sorted(e.strip(".") for e in VIDEO_EXTS), key="fire_vid_upload")
+            if uploaded_fv is not None:
+                ok, msg, tmp_path = validate_video_upload(uploaded_fv)
+                if not ok:
+                    st.error(msg)
+                else:
+                    video_path_f = tmp_path
+        else:
+            is_live_f = True
+            video_path_f = ip_camera_input("fire_ip_url")
+
+        if is_live_f:
+            max_seconds_f = float("inf")
+            st.caption("Süre sınırı yok — durdurmak için sağ üstteki **Stop** düğmesine bas.")
+        else:
+            max_seconds_f = video_duration_slider(video_path_f, "fire_vid_seconds")
+
+        if video_path_f and st.button("İzlemeyi Başlat", key="fire_vid_run"):
+            baglanti_ok_f = True
+            if is_live_f:
+                with st.spinner("Telefon kamerasına bağlanılıyor..."):
+                    baglanti_ok_f = check_ip_camera(video_path_f)
+                if not baglanti_ok_f:
+                    st.error(
+                        f"'{video_path_f}' adresinden görüntü alınamadı. Kontrol et: "
+                        "telefonda 'Start server' basılı mı, iki cihaz aynı Wi-Fi'da mı, "
+                        "adres telefon ekranındakiyle aynı mı?"
+                    )
+            if baglanti_ok_f:
+                from FireAndSmokeVideo import YanginDumanIzleyici
+                fire_model = load_fire_model()
+                # Her izleme oturumu İÇİN YENİ izleyici: iz geçmişi (N-of-M
+                # pencereleri) temiz başlar; model ise cache'ten paylaşılır.
+                izleyici = YanginDumanIzleyici(
+                    model=fire_model,
+                    esikler={"fire": fire_conf, "smoke": smoke_conf},
+                    kayit_klasoru=str(FIRE_DIR / "YanginKayitlari"),
+                    csv_yolu=str(FIRE_DIR / "yangin_olay_log.csv"),
+                )
+                frame_ph_f = st.empty()
+                status_ph_f = st.empty()
+                st.markdown("**Onaylanan yangın/duman olayları:**")
+                table_ph_f = st.empty()
+                run_fire_video(
+                    video_path_f, izleyici, float(max_seconds_f),
+                    frame_ph_f, status_ph_f, table_ph_f,
+                    csv_path=str(FIRE_DIR / "yangin_olay_log.csv"),
+                    live=is_live_f,
+                )
+
+        st.divider()
+        st.subheader("Olay kayıtları (yangin_olay_log.csv)")
+        fire_log_path = FIRE_DIR / "yangin_olay_log.csv"
+        if fire_log_path.exists():
+            st.dataframe(pd.read_csv(fire_log_path), width='stretch')
+        else:
+            st.info("Henüz kayıt yok.")
+
+        # Son kanıt fotoğrafları: onaylanan olayların anotasyonlu kareleri
+        kayit_dir_f = FIRE_DIR / "YanginKayitlari"
+        if kayit_dir_f.exists():
+            son_kanitlar = sorted(kayit_dir_f.glob("*.jpg"), key=lambda p: p.stat().st_mtime)[-6:]
+            if son_kanitlar:
+                st.subheader("Son kanıt fotoğrafları")
+                cols_k = st.columns(3)
+                for i, p in enumerate(reversed(son_kanitlar)):
+                    cols_k[i % 3].image(str(p), caption=p.name, width='stretch')

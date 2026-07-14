@@ -24,3 +24,12 @@ PlateDetection/.venv/
 PlateDetection/runs/
 PlateDetection/arabalar/sonuclar/
 PlateDetection/cikti_video/
+
+# FireAndSmoke: datasets, training outputs, evidence photos (too large / generated)
+FireAndSmoke/merged_dataset/
+FireAndSmoke/fire-and-smoke-1/
+FireAndSmoke/fire-smoke-1/
+FireAndSmoke/runs/
+FireAndSmoke/YanginKayitlari/
+FireAndSmoke/IslemGormusFotograflar/
+FireAndSmoke/*.zip
