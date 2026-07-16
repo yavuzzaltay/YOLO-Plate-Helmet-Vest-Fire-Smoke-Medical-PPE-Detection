@@ -190,11 +190,11 @@ def load_fire_model():
     """FireAndSmoke/runs/detect altındaki EN SON eğitimin best.pt'sini yükler.
 
     Modeli bir kez yükleyip cache'liyoruz; her izleme oturumu için yeni bir
-    YanginDumanIzleyici kurulur ama hepsi bu tek model nesnesini paylaşır
+    FireSmokeMonitor kurulur ama hepsi bu tek model nesnesini paylaşır
     (izleyici kurulurken tracker hafızası sıfırlanır, detay FireAndSmokeVideo.py'de).
     """
     from ultralytics import YOLO
-    from FireAndSmokeDetection import find_latest_best_weights
+    from FireAndSmokeVideo import find_latest_best_weights
     return YOLO(find_latest_best_weights())
 
 
@@ -492,7 +492,7 @@ def run_fire_video(video_path, izleyici, max_seconds, frame_ph, status_ph, table
 
     Kare okuma/örnekleme iskeleti run_vest_video ile birebir aynı (grab/retrieve,
     canlıda zaman bazlı örnekleme, dosyada kare atlama). Fark: her örnek kare
-    FireAndSmokeVideo.YanginDumanIzleyici'ye verilir; o da takip (track) +
+    FireAndSmokeVideo.FireSmokeMonitor'a verilir; o da takip (track) +
     N-of-M zamansal onay + kanıt fotoğrafı/CSV işlerini kendi içinde halleder.
     Alarm/bildirim yoktur — onaylanan olaylar sadece kaydedilir ve tabloda görünür.
     """
@@ -548,7 +548,7 @@ def run_fire_video(video_path, izleyici, max_seconds, frame_ph, status_ph, table
             sample_idx += 1
 
             # Tüm izleme zekâsı (track + N-of-M + kanıt kaydı) tek çağrıda:
-            cizili, yeni_olaylar = izleyici.kare_isle(frame, video_sec)
+            cizili, yeni_olaylar = izleyici.process_frame(frame, video_sec)
             if yeni_olaylar:
                 olay_sayisi += len(yeni_olaylar)
                 refresh_table()
@@ -556,10 +556,10 @@ def run_fire_video(video_path, izleyici, max_seconds, frame_ph, status_ph, table
             proc_fps = sample_idx / max(0.1, time.time() - t0)
             cizili = _draw_corner_info(cizili, proc_fps)
             frame_ph.image(cv2.cvtColor(cizili, cv2.COLOR_BGR2RGB), channels="RGB")
-            ozet = izleyici.durum_ozeti()
+            ozet = izleyici.get_status()
             sure_metni = f"{video_sec:5.1f}s" if live else f"{video_sec:5.1f}s / {max_seconds:.0f}s"
             status_ph.text(
-                f"Video: {sure_metni}   |   aktif iz: {ozet['aktif_iz']}   |   "
+                f"Video: {sure_metni}   |   aktif iz: {ozet['active_tracks']}   |   "
                 f"onaylı olay: {olay_sayisi}"
             )
     finally:
@@ -849,45 +849,106 @@ with tab_vest:
 
 # ───────────────────────────────── YANGIN & DUMAN SEKMESİ ─────────────────────────────────
 with tab_fire:
-    st.info(
-        "YOLO11 tabanlı yangın/duman modeli. Videoda tespitler ByteTrack ile takip edilir "
-        "ve N-of-M zamansal filtreden geçer: bir bölge son M kontrol karesinin en az N'inde "
-        "görülürse 'ONAYLI' sayılır (tek karelik yansıma/parıltı yanlış alarmları böyle elenir). "
-        "Onaylanan her olay için anotasyonlu kanıt fotoğrafı FireAndSmoke/YanginKayitlari/ "
-        "klasörüne, olay satırı yangin_olay_log.csv'ye yazılır. Ekranda ince sarı kutu = aday, "
-        "kalın kırmızı/turuncu kutu = onaylı yangın/duman."
-    )
-    # Sınıf bazlı eşikler: duman doğası gereği düşük skor aldığı için eşiği
-    # düşük, ateş parlak/turuncu nesnelerle karışabildiği için eşiği yüksek.
+    st.info("Ekranda ince sarı kutu = aday, kalın kırmızı/turuncu kutu = onaylı yangın/duman.")
+    # Sınıf bazlı eşikler: varsayılanlar evaluate.py'nin F1-Confidence
+    # eğrisinden (bkz. FireAndSmokeVideo.py DEFAULT_THRESHOLDS) veriyle
+    # bulundu, sezgiyle konmadı. Adım 0.01: bu hassasiyette bulunmuş
+    # değerleri (0.37 / 0.23) 0.05'lik adımla tam olarak seçemezdik.
     col_f, col_s = st.columns(2)
-    fire_conf = col_f.slider("Ateş (fire) güven eşiği", 0.1, 0.9, 0.45, 0.05, key="fire_conf")
-    smoke_conf = col_s.slider("Duman (smoke) güven eşiği", 0.1, 0.9, 0.30, 0.05, key="smoke_conf")
+    fire_conf = col_f.slider("Ateş (fire) güven eşiği", 0.1, 0.9, 0.37, 0.01, key="fire_conf")
+    smoke_conf = col_s.slider("Duman (smoke) güven eşiği", 0.1, 0.9, 0.23, 0.01, key="smoke_conf")
 
     sub_img_f, sub_video_f = st.tabs(["Görsel", "Video (gerçek zamanlı)"])
 
     with sub_img_f:
         st.subheader("Görselde yangın/duman tespiti")
-        uploaded_fi = st.file_uploader("Görsel yükle", type=sorted(e.strip(".") for e in IMAGE_EXTS), key="fire_img_upload")
-        image_path_f = None
-        if uploaded_fi is not None:
-            ok, msg = validate_image_upload(uploaded_fi)
-            if not ok:
-                st.error(msg)
-            else:
-                image_path_f = save_upload_to_temp(uploaded_fi)
-                st.image(image_path_f, caption="Yüklenen görsel", width=400)
+        # Not: TTA (Test Zamanında Veri Artırma) process_photo() içinde her
+        # zaman açık — burada ayrıca parametre olarak taşımaya gerek yok.
+        fire_examples_dir = FIRE_DIR / "FireAndSmokeExamples"
+        fire_examples_dir.mkdir(parents=True, exist_ok=True)
 
-        if image_path_f and st.button("Tespit Et", key="fire_img_run"):
-            from FireAndSmokeVideo import fotograf_isle
-            fire_model = load_fire_model()
-            frame_f = cv2.imread(image_path_f)
-            with st.spinner("İşleniyor..."):
-                annotated_f, counts_f = fotograf_isle(
-                    fire_model, frame_f,
-                    esikler={"fire": fire_conf, "smoke": smoke_conf},
-                )
-            st.image(cv2.cvtColor(annotated_f, cv2.COLOR_BGR2RGB), caption="Tespit sonucu", width='stretch')
-            st.write(counts_f if counts_f else "Yangın/duman tespit edilmedi.")
+        source_img_f = st.radio(
+            "Kaynak",
+            ["Örnek klasördeki görselleri kullan (FireAndSmokeExamples/)", "Kendi görselini yükle"],
+            key="fire_img_source",
+        )
+
+        if source_img_f == "Örnek klasördeki görselleri kullan (FireAndSmokeExamples/)":
+            # ─── Klasöre yeni görsel ekleme ───
+            # Bir klasördeki tüm fotoğrafları toplu gezme özelliği; ek olarak
+            # o klasöre doğrudan arayüzden fotoğraf da eklenebiliyor.
+            new_examples = st.file_uploader(
+                "FireAndSmokeExamples/ klasörüne yeni görsel ekle (birden fazla seçilebilir)",
+                type=sorted(e.strip(".") for e in IMAGE_EXTS),
+                accept_multiple_files=True,
+                key="fire_examples_add",
+            )
+            if new_examples:
+                eklenen = 0
+                for nf in new_examples:
+                    ok, msg = validate_image_upload(nf)
+                    if ok:
+                        (fire_examples_dir / nf.name).write_bytes(nf.getvalue())
+                        eklenen += 1
+                    else:
+                        st.error(f"{nf.name}: {msg}")
+                if eklenen:
+                    st.success(f"{eklenen} görsel FireAndSmokeExamples/ klasörüne eklendi.")
+                    st.session_state.pop("fire_batch_results", None)  # eski sonuçlar artık gecerli degil
+                    st.rerun()  # galeri listesi yeni eklenenleri hemen göstersin
+
+            samples_f = sorted(p for p in fire_examples_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+            if not samples_f:
+                st.warning(f"'{fire_examples_dir}' klasöründe örnek görsel bulunamadı. Yukarıdan ekleyebilirsin.")
+            else:
+                st.caption(f"'{fire_examples_dir}' klasöründeki {len(samples_f)} görsel:")
+                preview_cols_f = st.columns(6)
+                for i, p in enumerate(samples_f):
+                    preview_cols_f[i % 6].image(str(p), caption=p.name, width='stretch')
+
+                if st.button(f"Tüm örnek görselleri işle ({len(samples_f)} adet)", key="fire_batch_run"):
+                    from FireAndSmokeVideo import process_photo
+                    fire_model = load_fire_model()
+                    batch_results_f = []
+                    with st.spinner(f"{len(samples_f)} görsel işleniyor..."):
+                        for p in samples_f:
+                            frame_b = cv2.imread(str(p))
+                            annotated_b, counts_b = process_photo(
+                                fire_model, frame_b,
+                                thresholds={"fire": fire_conf, "smoke": smoke_conf},
+                            )
+                            batch_results_f.append((p.name, annotated_b, counts_b))
+                    st.session_state["fire_batch_results"] = batch_results_f
+
+            if st.session_state.get("fire_batch_results"):
+                st.divider()
+                st.subheader("Toplu işleme sonuçları")
+                for name, annotated_b, counts_b in st.session_state["fire_batch_results"]:
+                    ozet_b = counts_b if counts_b else "tespit yok"
+                    with st.expander(f"{name} — {ozet_b}"):
+                        st.image(cv2.cvtColor(annotated_b, cv2.COLOR_BGR2RGB), width='stretch')
+        else:
+            uploaded_fi = st.file_uploader("Görsel yükle", type=sorted(e.strip(".") for e in IMAGE_EXTS), key="fire_img_upload")
+            image_path_f = None
+            if uploaded_fi is not None:
+                ok, msg = validate_image_upload(uploaded_fi)
+                if not ok:
+                    st.error(msg)
+                else:
+                    image_path_f = save_upload_to_temp(uploaded_fi)
+                    st.image(image_path_f, caption="Yüklenen görsel", width=400)
+
+            if image_path_f and st.button("Tespit Et", key="fire_img_run"):
+                from FireAndSmokeVideo import process_photo
+                fire_model = load_fire_model()
+                frame_f = cv2.imread(image_path_f)
+                with st.spinner("İşleniyor..."):
+                    annotated_f, counts_f = process_photo(
+                        fire_model, frame_f,
+                        thresholds={"fire": fire_conf, "smoke": smoke_conf},
+                    )
+                st.image(cv2.cvtColor(annotated_f, cv2.COLOR_BGR2RGB), caption="Tespit sonucu", width='stretch')
+                st.write(counts_f if counts_f else "Yangın/duman tespit edilmedi.")
 
     with sub_video_f:
         st.subheader("Videoda gerçek zamanlı yangın/duman izleme")
@@ -929,15 +990,15 @@ with tab_fire:
                         "adres telefon ekranındakiyle aynı mı?"
                     )
             if baglanti_ok_f:
-                from FireAndSmokeVideo import YanginDumanIzleyici
+                from FireAndSmokeVideo import FireSmokeMonitor
                 fire_model = load_fire_model()
                 # Her izleme oturumu İÇİN YENİ izleyici: iz geçmişi (N-of-M
                 # pencereleri) temiz başlar; model ise cache'ten paylaşılır.
-                izleyici = YanginDumanIzleyici(
+                izleyici = FireSmokeMonitor(
                     model=fire_model,
-                    esikler={"fire": fire_conf, "smoke": smoke_conf},
-                    kayit_klasoru=str(FIRE_DIR / "YanginKayitlari"),
-                    csv_yolu=str(FIRE_DIR / "yangin_olay_log.csv"),
+                    thresholds={"fire": fire_conf, "smoke": smoke_conf},
+                    record_dir=str(FIRE_DIR / "YanginKayitlari"),
+                    csv_path=str(FIRE_DIR / "yangin_olay_log.csv"),
                 )
                 frame_ph_f = st.empty()
                 status_ph_f = st.empty()

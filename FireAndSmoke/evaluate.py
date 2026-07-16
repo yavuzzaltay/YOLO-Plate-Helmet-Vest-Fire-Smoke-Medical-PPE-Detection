@@ -19,8 +19,8 @@ import torch
 from ultralytics import YOLO
 
 # En son egitimin best.pt'sini bulan fonksiyonu tekrar yazmak yerine
-# FireAndSmokeDetection.py'den yeniden kullaniyoruz (tek dogru kaynak).
-from FireAndSmokeDetection import find_latest_best_weights
+# FireAndSmokeVideo.py'den yeniden kullaniyoruz (tek dogru kaynak).
+from FireAndSmokeVideo import find_latest_best_weights
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_YAML = BASE_DIR / "merged_dataset" / "data.yaml"

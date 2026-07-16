@@ -6,16 +6,17 @@
 | `prepare_dataset.py` | İki Roboflow veri setini (HUO/YAN + fire/smoke) tek `merged_dataset/`e birleştirir, sınıf id'lerini isme göre normalize eder (0=fire, 1=smoke) |
 | `train.py` | `merged_dataset/` üzerinde YOLO11s eğitimi başlatır |
 | `evaluate.py` | En son eğitimin `best.pt`'sini **test** setinde ölçer (mAP/precision/recall) — eğitim öncesi/sonrası karşılaştırma bununla yapılır |
-| `FireAndSmokeDetection.py` | Eğitilmiş modelle klasördeki fotoğrafları toplu işler (sınıf bazlı güven eşiği + opsiyonel TTA) |
-| `FireAndSmokeVideo.py` | Gerçek zamanlı video izleme çekirdeği: ByteTrack takip + N-of-M zamansal onay + kanıt fotoğrafı (`YanginKayitlari/`) + olay CSV'si (`yangin_olay_log.csv`). Kökteki Streamlit arayüzü (`app.py`, 🔥 sekmesi) bu modülü kullanır; `python FireAndSmokeVideo.py video.mp4` ile arayüzsüz de test edilebilir |
+| `FireAndSmokeVideo.py` | Tespit çekirdeği — hem fotoğraf (`process_photo`, sınıf bazlı eşik + opsiyonel TTA) hem gerçek zamanlı video (`FireSmokeMonitor`: ByteTrack takip + N-of-M zamansal onay + kanıt fotoğrafı `YanginKayitlari/` + olay CSV'si `yangin_olay_log.csv`) burada. `find_latest_best_weights()` de burada tanımlı, `evaluate.py` ve `app.py` buradan import ediyor (tek doğru kaynak). Kökteki Streamlit arayüzü (`app.py`, 🔥 sekmesi) bu modülü kullanır; `python FireAndSmokeVideo.py video.mp4` ile arayüzsüz de test edilebilir |
 
 ## Çalıştırma sırası
 ```
 python prepare_dataset.py   # sadece veri değişince
 python train.py             # eğitim (GPU'lu ortamda)
 python evaluate.py          # sayısal ölçüm
-python FireAndSmokeDetection.py   # görsel test
 ```
+Görsel/toplu test ve klasöre foto ekleme artık Streamlit arayüzünde
+(`streamlit run app.py`, 🔥 Yangın & Duman Tespiti sekmesi, Görsel alt
+sekmesi) — ayrı bir CLI scripti yok, tek yer burası.
 
 ## Veri iyileştirme durumu
 
