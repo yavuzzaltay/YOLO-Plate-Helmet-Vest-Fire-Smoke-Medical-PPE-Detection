@@ -1,0 +1,522 @@
+======================================================================
+İYEX TESPİT PLATFORMU — PROJE RAPORU
+Hazırlanma tarihi: 2026-07-17
+======================================================================
+
+Bu belge, İyex projesinin tamamını (ne yapıldığını, neyin nasıl
+çalıştığını, hangi teknolojilerin kullanıldığını ve şu anki durumu)
+tek bir yerden anlatmak için hazırlandı. Proje köke tek bir Streamlit
+uygulamasında (app.py) birleşen DÖRT bağımsız görüntü işleme modülünden
+oluşuyor:
+
+  1) PlateDetection            -> Plaka tespiti + OCR okuma
+  2) VestAndPlateDetection      -> Baret & yelek (iş güvenliği) tespiti
+  3) FireAndSmoke               -> Yangın & duman tespiti/izleme
+  4) MedicalPPE                 -> Tıbbi koruyucu ekipman (KKD) uyum izleme
+
+Dördü de aynı temel felsefeyi paylaşıyor ama birbirinden TAMAMEN
+BAĞIMSIZ: hiçbiri bir diğerini import etmiyor, her biri kendi
+klasöründe kendi kendine yeterli. Bu bilinçli bir tercih — biri
+bozulursa/değişirse diğerleri etkilenmesin, her biri komut satırından
+da tek başına çalışabilsin diye.
+
+Bu rapor uzun olduğu için önce genel mimariyi, sonra dört modülü ayrı
+ayrı, en sonda da ortak arayüzü (app.py) ve şu anki bekleyen işleri
+anlatıyor.
+
+
+======================================================================
+1. TÜM MODÜLLERİN PAYLAŞTIĞI ORTAK MİMARİ
+======================================================================
+
+Her tespit modülü aynı 4 katmanlı düzeni izliyor (video/canlı izleme
+tarafında):
+
+  KATMAN 1 — YOLO TRACK
+    model.track(persist=True) çağrılır. Sıradan "predict"ten farkı:
+    ByteTrack algoritması her nesneye kareler arasında KALICI bir
+    kimlik (track id) verir. "5 numaralı duman bulutu 12 karedir
+    görünüyor" diyebilmemizin sebebi bu.
+
+  KATMAN 2 — SINIF BAZLI GÜVEN EŞİĞİ
+    Her sınıfın (fire, smoke, no-surgical-gloves, no-hardhat...) KENDİ
+    güven eşiği var. Bu eşikler sezgiyle değil, evaluate.py'nin ürettiği
+    F1-Confidence eğrisinden (o sınıf için F1 skorunun zirve yaptığı
+    güven değeri neyse) hesaplanıyor.
+
+  KATMAN 3 — N-of-M ZAMANSAL FİLTRE (bu mimarinin asıl katma değeri)
+    Tek karelik tespit güvenilmez: bir ışık yansıması "fire" çıkabilir,
+    el bir an ekrandan çıkabilir. Kural: bir iz (track id), son M
+    örnekleme karesinin en az N'inde eşiği geçen bir tespitle
+    görüldüyse "ONAYLANMIŞ" sayılır. Örnek: FireAndSmoke'ta fire için
+    4/8, smoke için 5/10; MedicalPPE'de ihlaller için 6/10 (oklüzyon
+    riski yüzünden yangından daha temkinli).
+
+  KATMAN 4 — ONAY ANINDA KANIT KAYDI (alarm/bildirim YOK — bilinçli
+    tercih)
+      - Anotasyonlu tam kare fotoğraf -> ilgili modülün "kayıt" klasörüne
+      - CSV satırı (tarih, video saniyesi, sınıf, güven, iz id, dosya adı)
+    Aynı iz için kanıt SADECE BİR KEZ alınır; yoksa aynı olay her
+    karede yeni fotoğraf üretip diski doldururdu.
+
+FOTOĞRAF MODUNDA farklı bir yol izleniyor: zamansal filtre tek karede
+anlamsız olduğu için sadece sınıf eşiği uygulanıyor, ama TTA (Test
+Zamanında Veri Artırma — görseli orijinal + aynalı + ölçekli
+varyasyonlarda modele sokup sonuçları birleştirme) HER ZAMAN açık;
+video gibi hız kaygısı olmadığı için bu ~2-3 kat yavaşlamanın maliyeti
+yok, isabet kazancı değerli.
+
+EKRANDAKİ RENK DİLİ (tüm modüllerde tutarlı):
+  İnce/sarı kutu   = ADAY  (tespit var, henüz N-of-M onayı yok)
+  Kalın/renkli kutu = ONAYLI
+Bu ayrım kullanıcıya "model bir şey gördü" ile "sistem bundan emin"
+arasındaki farkı canlı gösteriyor.
+
+KOD YAZIM KURALLARI (tüm modüllerde tutarlı):
+  - Yorumlar Türkçe ve GEREKÇELİ yazılıyor (ne değil, NEDEN).
+  - Eşikler/parametreler asla "göz kararı" değil, ölçülerek bulunuyor
+    (evaluate.py script'leri veya doğrudan deneyle).
+  - Yeni bir teknik eklenmeden önce mümkünse gerçek test setinde
+    ölçülüyor; işe yaramıyorsa ya da zarar veriyorsa geri alınıyor.
+
+
+======================================================================
+2. MODÜL: PlateDetection — Plaka Tespiti + OCR
+======================================================================
+
+AMAÇ: Araç fotoğraflarından/videolarından plaka bulup metnini OCR ile
+okumak, Türk plaka formatına göre doğrulayıp CSV'ye kaydetmek.
+
+ANA DOSYALAR:
+  colab_local.py   (2326 satır) — fotoğraf (tekli/toplu) işleme hattı
+  video_plaka.py    (598 satır) — gerçek zamanlı video/canlı yayın hattı
+  best.pt                       — YOLO tespit modeli (tek sınıf: plaka)
+  Plate-Detection-2/            — Roboflow veri seti (CC BY 4.0,
+                                   guler-kandeger/plate-detection-vh2rk)
+
+GÖRSEL MODU İŞ AKIŞI (colab_local.process_single_image):
+  1) ÇOK GEÇİŞLİ YOLO TESPİTİ (detect_plate_boxes):
+       Geçiş 1: imgsz=1280, conf=0.25  (normal durumlar, hızlı)
+       Geçiş 2: imgsz=1920, conf=0.10  (küçük/uzak plakalar)
+       Geçiş 3: imgsz=640,  conf=0.03  (modelin eğitim çözünürlüğü +
+                çok düşük eşik — bazı plakalar SADECE burada görünüyor)
+       Üç geçişin kutuları birleştirilip IoU>0.5 veya %85 içerme
+       kuralıyla tekilleştiriliyor. Ayrıca geometri filtresi var:
+       en/boy oranı 1.5-7.5 arası, min genişlik 30px, min yükseklik 10px.
+  2) YOLO hiç bulamazsa: detect_plate_classical() — BLACKHAT
+       morfolojisiyle (parlak zemindeki koyu yapıları, yani plaka
+       harflerini, vurgulayan klasik görüntü işleme) son çare arama.
+  3) Bulunan her aday kutu için process_plate_candidate():
+       mavi/turuncu/siyah sticker temizleme, altlık temizleme,
+       enhance_plate_for_ocr() ile İYİLEŞTİRME:
+         - Adaptif büyütme (hedef plaka yüksekliği ~160px, LANCZOS4)
+         - CLAHE (Contrast Limited Adaptive Histogram Equalization,
+           clipLimit=2.0, tileGridSize=8x8) — LAB renk uzayında sadece
+           L (parlaklık) kanalına uygulanıyor ki renkler bozulmasın
+         - Bilateral filtre (kenarları koruyarak gürültü azaltma)
+         - Unsharp masking (keskinleştirme)
+       Sonra EasyOCR ile metin okunuyor, Türk plaka formatına göre
+       düzeltiliyor (format_turkish_plate_ex), çoklu karakter oyu
+       (_character_vote) ile en olası okuma seçiliyor.
+  ÖNEMLİ NOT: CLAHE SADECE bu OCR-iyileştirme aşamasında, plaka
+  kırpıldıktan SONRA uygulanıyor — YOLO tespiti hiçbir zaman CLAHE'li
+  görüntü görmüyor, dolayısıyla tespit metriklerini (precision/recall/
+  mAP) etkilemiyor.
+
+VİDEO MODU İŞ AKIŞI (video_plaka.py):
+  - pick_imgsz(frame_width): çözünürlüğe göre TEK bir imgsz seçilir
+    (4K'da 1920, altında 1280) — görsel moddaki 3 geçişli kademe YOK,
+    kare başına TEK geçiş (detect_boxes_fast). Gerekçe: video kare
+    kare aktığı için bir karede kaçan plaka birkaç kare sonra tekrar
+    denenip yakalanabiliyor (zamansal fazlalık), pahalı çok geçişe
+    gerek görülmemiş.
+  - PlateTrack sınıfı + IoU tabanlı iz eşleştirme (IOU_MATCH=0.30),
+    iz başına en iyi 5 kırpım toplanıp OCR'a gönderiliyor
+    (BEST_CROPS=5 — tek kırpımlık eksik okumanın çoğunluk oyuyla
+    düzeltildiği gözlemlenmiş).
+  - attempt_read + cross-validation: birden fazla kırpımdan okunan
+    metinler karşılaştırılıp (cross_validated) güvenilir olanı loglanıyor.
+  - klasik CV yedeği (detect_plate_classical) VİDEODA YOK — hız kritik.
+
+ÖLÇÜLEN METRİKLER (2026-07-17, Plate-Detection-2/test, 391 görüntü):
+  Düz model.val() (yalnızca ham YOLO):
+      Precision 98.1%  Recall 98.1%  mAP50 99.3%  mAP50-95 86.7%
+  GERÇEK üretim pipeline'ı (çok geçişli + geometri filtresi + klasik
+  CV yedeği; Ultralytics'in kendi ap_per_class/box_iou fonksiyonları bu
+  özel tahminlere uygulanarak ölçüldü):
+      Precision 91.7%  Recall 85.7%  mAP50 86.1%  mAP50-95 66.7%
+  NOT: gerçek pipeline'ın düz ölçümden DAHA DÜŞÜK çıkması hata değil —
+  test görüntüleri zaten 640x640'a küçültülmüş halde geldiği için
+  1280/1920'ye büyütmenin kazandıracağı detay yok, üstelik geometri
+  filtresi bazı doğru kutuları da eleyebiliyor. Gerçekten yüksek
+  çözünürlüklü/uzak-plakalı fotoğraflarda bu fark muhtemelen tersine
+  döner (multi-pass tam bunun için tasarlandı).
+
+ARAYÜZDE: örnek klasördeki (arabalar/) görselleri toplu işleme, tekli
+görsel yükleme, video (örnek kamera.mp4 / kendi videon / IP Webcam
+telefon kamerası), sonuçlar plaka_log.csv ve plaka_video_log.csv'ye
+kaydediliyor ve tabloda gösteriliyor.
+
+
+======================================================================
+3. MODÜL: VestAndPlateDetection — Baret & Yelek Tespiti
+======================================================================
+
+AMAÇ: İş güvenliği ortamında baret (hardhat) ve yelek (safety-vest)
+takılıp takılmadığını tespit etmek.
+
+DURUM: Bu modül en sade olanı — klasörde sadece eğitilmiş best.pt ve
+bir ihlal_log.csv var; örnek görsel/video, ayrı bir eğitim scripti ya
+da yerel veri seti yok (muhtemelen başka bir ortamda eğitilmiş).
+
+SINIFLAR: hardhat, no-hardhat, safety-vest, no-safety-vest, person
+(pozitif+negatif şema — MedicalPPE'nin "direct" modunun ilham aldığı
+düzenin aynısı burada da zaten mevcuttu).
+
+METRİKLER: yerelde bağımsız bir test seti OLMADIĞI için gerçek bir
+ölçüm yapılamıyor; bunun yerine best.pt dosyasının PyTorch checkpoint'i
+içine Ultralytics'in eğitim sonunda otomatik gömdüğü son doğrulama
+sonuçları okunuyor (arayüzde bu açıkça "eğitim sırasındaki son
+doğrulama, yerelde ayrı test seti yok" diye belirtiliyor):
+      Precision 92.6%  Recall 91.0%  mAP50 94.6%  mAP50-95 70.5%
+
+ARAYÜZDE: görsel yükleyip anlık tespit + ihlal_log.csv'ye manuel kayıt,
+video (kendi videon / IP Webcam), güven eşiği slider'ı (0.1-0.9).
+
+
+======================================================================
+4. MODÜL: FireAndSmoke — Yangın & Duman Tespiti
+======================================================================
+
+AMAÇ: Kamera görüntüsünde yangın (fire) ve duman (smoke) tespit edip
+zamansal olarak doğrulamak, kanıt biriktirmek (alarm YOK, bilinçli
+tercih — sistem "izleme ve kayıt" için, otomatik müdahale için değil).
+
+ANA DOSYA: FireAndSmokeVideo.py (474 satır) — FireSmokeMonitor sınıfı
+(video/canlı) + process_photo (tek kare) + find_latest_best_weights()
+(runs/detect altındaki en güncel eğitimi otomatik bulur).
+
+VERİ: merged_dataset/ — İKİ ayrı Roboflow kaynağının prepare_dataset.py
+ile birleştirilmiş hali:
+  - fire-smoke-1     : Çince etiketli (HUO=huo/ateş, YAN=yan/duman)
+  - fire-and-smoke-1 : İngilizce etiketli (fire, smoke)
+  NAME_SYNONYMS sözlüğü ikisini de ortak 0=fire, 1=smoke sınıflarına
+  eşliyor (etiket dosyalarındaki class id'ler bu ortak sıraya göre
+  YENİDEN YAZILIYOR — iki farklı veri setinin id'lerini üst üste
+  koyarsak çakışma riski var, isim bazlı eşleme bunu önlüyor).
+
+DENENEN 3 EĞİTİM (runs/detect altında):
+  fire_smoke_yolo11-4    — ilk deneme (nano model civarı)
+  fire_smoke_yolo11s     — yolo11 small
+  fire_smoke_yolo11s_dfire — ŞU AN AKTİF ("D-Fire-less" varyant,
+                             en son değiştirilen dosya olduğu için
+                             find_latest_best_weights() bunu seçiyor)
+
+EŞİKLER (F1-Confidence zirvesinden kalibre — göz kararı DEĞİL):
+  fire  eşiği = 0.37   (F1 zirvesi ~0.614)
+  smoke eşiği = 0.23   (F1 zirvesi ~0.634)
+
+N-of-M PENCERELERİ: fire 4/8 (kısa pencere, hızlı tepki), smoke 5/10
+(uzun pencere, duman şekilsiz olduğu için daha fazla kanıt gerekiyor).
+
+ÖLÇÜLEN METRİKLER (2026-07-17, merged_dataset/test, 351 görüntü,
+aktif model fire_smoke_yolo11s_dfire):
+      Precision 72.8%  Recall 53.0%  mAP50 61.1%  mAP50-95 35.4%
+  (Fire ve smoke sınıfları ayrı ayrı da benzer seviyede: fire mAP50
+  ~0.60, smoke mAP50 ~0.62 — recall'ın düşük kalması, duman gibi
+  şekilsiz/yarı saydam nesnelerin doğası gereği zor olmasından.)
+
+ARAYÜZDE: örnek klasör galerisi (FireAndSmokeExamples/ — kullanıcı
+buraya kendi görsellerini de ekleyebiliyor), video (yükle / IP Webcam),
+ateş ve duman için AYRI güven eşiği slider'ları, olay kayıtları
+(yangin_olay_log.csv) ve son kanıt fotoğrafları galerisi
+(YanginKayitlari/).
+
+
+======================================================================
+5. MODÜL: MedicalPPE — Tıbbi PPE (KKD) Uyum İzleme
+======================================================================
+
+Bu modül BU OTURUMDA SIFIRDAN YAZILDI ve projenin en çok emek verilen,
+en güncel parçası. Aşama aşama anlatılıyor.
+
+--------------------------------------------------------------
+5.1 BAŞLANGIÇ — model yokken sınıf tasarımı
+--------------------------------------------------------------
+Kullanıcı istek attığında model henüz Kaggle'da eğitiliyordu, sınıf
+adları bile bilinmiyordu. Bu yüzden MedicalPPEVideo.py, model hangi
+sınıf adlarıyla gelirse gelsin çalışacak şekilde tasarlandı:
+
+  ITEM_ALIASES sözlüğü: onlarca olası ham sınıf adını ("gloves",
+  "Glove", "no_gown", "hairnet"...) kanonik ekipman adına eşliyor
+  (eldiven, bone, önlük, forma, galos, gözlük, maske, siperlik...).
+  NEGATION_PREFIXES ("no", "non", "without", "incorrect"...) ile
+  negatif/ihlal sınıfları da otomatik tanınıyor.
+
+  resolve_model_classes(): model.names'i okuyup her sınıfı ClassInfo
+  nesnesine (role=person/item/unknown, item=kanonik ad,
+  positive=True/False) çeviriyor.
+
+--------------------------------------------------------------
+5.2 ARAŞTIRMA — kullanıcının verdiği makale ve alternatifler
+--------------------------------------------------------------
+Kullanıcının paylaştığı MEAG-YOLO makalesi (Appl. Sci. 2024, elektrik
+trafo merkezi PPE'si — MSCA+EC2f+ASFF+GhostConv ile YOLOv8n'i
+iyileştiriyor, +2.4 precision) incelendi ve BİLİNÇLİ OLARAK
+KULLANILMADI. Gerekçe (README.md'de detaylı):
+  - Veri seti tıbbi değil (trafo merkezi) ve paylaşılmamış.
+  - Kazanç marjinal (+2.4), buna karşılık özel mimari yazmak
+    (Ultralytics'te custom modül+yaml) kalıcı bir bakım yükü getiriyor.
+  - Aynı bütçeyle model boyutu büyütmek (n->s) veya çözünürlük
+    artırmak (640->768) literatürde tutarlı olarak daha çok kazandırıyor.
+
+Bunun yerine gerçekten kullanılan/faydalanılan kaynaklar:
+  - Sensors 2025 (hijyen uyumu YOLO kıyaslaması, 31k görüntü):
+    pozitif+negatif sınıf şeması fikri buradan geldi (direct modun
+    temeli); ayrıca zayıf sınıflara ek veri ararken kullanılan ham
+    Roboflow kaynakları (GP, Final Work) da bu makalenin kaynakçasından
+    bulundu.
+  - CPPE-5 (tıbbi PPE veri seti; coverall/face shield/glove/goggles/
+    mask) — ileride gözlük/önlük zayıf çıkarsa ilk başvurulacak kaynak
+    olarak not edildi.
+
+--------------------------------------------------------------
+5.3 MODEL GELDİ (2026-07-16) — entegrasyon
+--------------------------------------------------------------
+best.pt: yolo11s, 100 epoch, imgsz 640, batch 16, Kaggle'da eğitildi.
+14 SINIF (gerçek model.names çıktısı):
+  person, surgical-cap, no-surgical-cap, surgical-gloves,
+  no-surgical-gloves, surgical-mask, surgical-gown, shoe-covers,
+  surgical-scrubs, face-shield, no-facial-gear, no-medical-attire,
+  goggles, coverall
+Negatif sınıflar bulunduğu için izleme otomatik olarak "direct" modda
+çalışıyor (en sağlıklı düzen — negatif tespit doğrudan ihlal demek,
+ayrıca kişi-ekipman kutu eşleştirmesine gerek yok).
+
+Eklenen sağlamlık teknikleri:
+  - _suppress_conflicts(): aynı ekipmanın pozitif ve negatif tespiti
+    aynı bölgeye (IoU>0.45) düşerse güveni yüksek olan kazanır
+    (standart NMS bunu ELEYEMEZ çünkü farklı sınıflar arasında çalışmaz).
+  - MIN_BOX_PX=12: bu boyuttan küçük kutular doku/gölge kaynaklı
+    yanlış alarm sayılıp elenir.
+  - process_photo'da TTA her zaman açık (fotoğraf modu, hız kaygısı yok).
+
+--------------------------------------------------------------
+5.4 YEREL VERİ HATTI — prepare_dataset.py
+--------------------------------------------------------------
+Kaggle'da kullanılan veri hazırlama akışının yerel/tekrarlanabilir
+karşılığı yazıldı. 3 ÇEKİRDEK Roboflow kaynağı (best.pt'yi eğiten
+Kaggle akışıyla birebir aynı):
+  ds1: ribal/surgical-dataset-hsnio
+  ds2: ecrioobjectdetection1/meppe      <- TÜM negatif sınıfların
+                                            (no-surgical-cap/-gloves/
+                                            no-facial-gear/-medical-
+                                            attire) TEK kaynağı
+  ds3: new-workspace-n2w3n/medical-ppe-o6ot6-gesry
+CLASS_MAPPING ile her kaynağın kendi sınıf adları FINAL_NAMES'teki
+ortak 14 sınıf sırasına eşleniyor (best.pt ile tutarlı kalması için
+bu sıra ASLA değiştirilmemeli).
+
+WINDOWS YOL SORUNU VE ÇÖZÜMÜ: Roboflow'un bazı dosya adları ~200
+karakter; proje klasörünün derin/Unicode yoluyla birleşince Windows'un
+260 karakterlik MAX_PATH sınırı aşılıp indirme sessizce başarısız
+oluyordu. Çözüm: ham indirme proje dışına, kısa bir yola (C:\ppe_raw)
+yönlendirildi; birleştirme sırasında da dosyalar kısa/sıralı adlarla
+(ds1_00001.jpg gibi) kopyalanıyor.
+
+API ANAHTARI GÜVENLİĞİ: repo GitHub'da PUBLIC olduğu için Roboflow API
+anahtarı koda gömülmedi. .roboflow_key dosyasına yazıldı, bu dosya
+.gitignore'da — asla commit'lenmez.
+
+--------------------------------------------------------------
+5.5 EŞİK KALİBRASYONU
+--------------------------------------------------------------
+evaluate.py (+ Kaggle'da çalışacak evaluate_kaggle.ipynb kopyası)
+yazıldı: test setinde mAP/precision/recall raporluyor VE her sınıf
+için F1-Confidence eğrisinin zirvesindeki güven değerini bularak
+DEFAULT_THRESHOLDS sözlüğünü doğrudan koda yapıştırılabilir formatta
+basıyor. Bu değerler MedicalPPEVideo.py'ye işlendi.
+
+BAĞIMSIZ TEST SETİ SONUCU (535 görüntü, best.pt v1, 2026-07-17):
+      Precision 76.3%  Recall 80.3%  mAP50 80.0%  mAP50-95 47.9%
+(Kaggle'daki eğitim-içi val sonucundan (mAP50 77.1%) bile biraz daha
+iyi çıktı — muhtemelen daha büyük/çeşitli bağımsız test seti sayesinde.)
+
+--------------------------------------------------------------
+5.6 ZAYIF SINIF TANISI — kök neden analizi
+--------------------------------------------------------------
+En zayıf 3 sınıf: no-surgical-gloves (mAP50-95 0.195), no-surgical-cap
+(0.253), no-facial-gear (0.304) — diğerlerinin neredeyse yarısı.
+İKİ somut kök neden bulundu (rakamlarla + görsel inceleme ile):
+
+  1) KÜÇÜK KUTU: bu 3 sınıfın medyan kutu alanı görüntünün sadece
+     %0.9-1.6'sı. no-facial-gear özellikle çarpıcı: medyan %1.60 iken
+     pozitif karşılığı face-shield %16.36 — 10 KAT daha küçük.
+  2) TEK KAYNAK: bu 4 negatif sınıfın (no-cap/-gloves/-facial-gear/
+     -medical-attire) TAMAMI (1000+ örnek her biri) SADECE ds2'den
+     geliyor; ds1/ds3 hiç katkı yapmıyor. 24 örnek görsel olarak
+     incelendi: kutu KALİTESİ makul/tutarlı (etiketleme hatası değil)
+     ama görüntülerin çoğu STÜDYO/STOK FOTOĞRAF tarzı (tek kişi, düz
+     arka plan) — gerçek hastane ortamının (kamera açısı, kalabalık,
+     hareket bulanıklığı) neredeyse hiç temsilcisi yok.
+
+  DENENİP ELENEN YOL: P2 (küçük nesne) tespit başlığı — kurulu
+  Ultralytics sürümü YOLO11 için hazır bir P2 varyantı sağlamıyor,
+  elle mimari yazmak MEAG-YOLO'da reddedilen aynı bakım yükünü
+  getirirdi; bu yüzden gündeme alınmadı.
+
+--------------------------------------------------------------
+5.7 ÇÖZÜM A — Yeniden eğitim hazırlığı (henüz KOŞULMADI)
+--------------------------------------------------------------
+  - train.py: imgsz 640->768 (küçük kutu sorununu hedefliyor).
+  - batch: ÖLÇÜLEREK 4'ten 12'ye YÜKSELTİLDİ (düşürülmedi — kullanıcı
+    "batch düşürmek oranları düşürürse hiç yapma" dedi ve haklıydı;
+    BatchNorm istatistikleri küçük batch'te bozulur). Verinin %5'iyle
+    mini-koşularla VRAM ölçüldü: 768px'te batch=4->2.72GB, 8->3.25GB,
+    12->4.75GB (seçilen, rahat pay), 16->6.06GB (6GB kartta sınırda).
+    "6GB'da batch=4 bile riskli" bilgisi eski torch sürümünden kalma
+    ve artık geçersizmiş.
+  - Veri seti genişletildi: Sensors 2025 makalesinin ham Roboflow
+    kaynakları eklendi:
+      ds4: gp-zmz2y/gp-fqlbs
+      ds5: nku-oyddi/final-work-nyuq2
+    Sadece zayıf sınıfları içeren görüntüler alınıyor (only_final_ids),
+    bu kaynaklardan HİÇBİR görüntü test setine sızmıyor (test_to_train)
+    — böylece 535 görüntülük benchmark SABİT kalıyor, eski/yeni model
+    karşılaştırması adil oluyor.
+    Sonuç: no-surgical-cap 1.1k->10.6k, no-surgical-gloves 1.3k->15.3k,
+    no-facial-gear 0.9k->13.6k eğitim örneği (10-15 kat artış).
+  - EĞİTİM BAŞLATILDI, sonra KULLANICI İSTEĞİYLE DURDURULDU (epoch
+    1/150'nin ortasında). ŞU AN best.pt HÂLÂ ESKİ (640px) MODEL.
+    train.py + genişletilmiş veri seti (MedicalPPE/dataset/, 14375
+    eğitim görüntüsü) hazır bekliyor; kullanıcı ne zaman isterse
+    (yerelde ya da Kaggle'da) çalıştırılabilir.
+
+--------------------------------------------------------------
+5.8 ÇÖZÜM B — Dilimli tespit (SAHI yaklaşımı, UYGULANDI ve ÖLÇÜLDÜ)
+--------------------------------------------------------------
+Yeniden eğitim GEREKTİRMEDEN, salt çıkarım-zamanı bir teknik:
+process_photo artık tam kare + TTA geçişine ek olarak kareyi %20
+örtüşmeli 2x2 dilime bölüp her dilimi ayrı 640px'te modele sokuyor.
+Küçük bir nesne, tam karede 0.5x küçülürken dilimde ~0.9x (neredeyse
+1.8 kat daha büyük) görünüyor.
+
+3 kez denenip test setiyle ölçülerek rafine edildi:
+  v1 (filtresiz): zayıf sınıflar iyileşti AMA person mAP50 0.88->0.25'e
+    ÇÖKTÜ (dilim insanı ortadan kesince yarım gövde yanlış alarm oluyor)
+    -> reddedildi.
+  v2 (küçük-kutu + kenar-kesim + sadece-negatif-sınıf filtreleri):
+    pozitif hasar durdu ama kazanç yarıya indi (dilimin iyi kutusu,
+    tam karenin kötü kutusuna "aynı nesne" sayılıp atılıyordu).
+  v3 NİHAİ (yukarıdakilere ek: çiftlerde güveni yüksek olan kazanır):
+
+SONUÇ (535 görüntülük sabit test setinde, eşik/boyut filtresiz saf
+tespit ölçümü):
+      no-facial-gear:      0.585 -> 0.684  (+9.9 puan mAP50)
+      no-surgical-cap:     0.553 -> 0.591  (+3.8 puan)
+      no-surgical-gloves:  0.419 -> 0.455  (+3.6 puan)
+      no-medical-attire:   0.745 -> 0.756  (+1.1 puan)
+      TÜM POZİTİF SINIFLAR: ±0.000 (hiçbirine dokunulmuyor)
+      GENEL mAP50: 0.777 -> 0.790
+
+Bedel: fotoğraf başına ~0.07s -> ~0.24s (fotoğraf modunda önemsiz).
+VİDEODA KAPALI: hız bütçesi + zamansal N-of-M zaten kaçan kareyi
+telafi ettiği için gerek görülmedi.
+
+--------------------------------------------------------------
+5.9 Bulunan ve düzeltilen hatalar
+--------------------------------------------------------------
+  1) Çifte ihlal raporu: process_photo, model "direct" modda (negatif
+     sınıflar zaten "X yok" diyorken) AYRICA kişi-ekipman kutu
+     eşleştirmesiyle "kadrajda görünmeyen her ekipman eksiktir" diye
+     sahte bir ikinci ihlal listesi üretiyordu (ör. fotoğrafa hiç
+     girmeyen ayakkabıyı bile "eksik" sayıyordu). Artık process_photo
+     da MedicalPPEMonitor ile AYNI mod seçimini yapıyor.
+  2) Karışan sayaç anahtarı: counts sözlüğünde pozitif ve negatif
+     tespit aynı anahtarda toplanıyordu ("eldiven: 2" hem "2 var" hem
+     "1 var+1 yok" anlamına gelebiliyordu). Negatifler artık
+     "eldiven-YOK" gibi ayrı anahtarla sayılıyor.
+  3) Plaka metrik hesaplamasında göreceli-yol hatası (os.chdir sonrası
+     path'lerin yanlış katlanması) bulunup .resolve() ile düzeltildi.
+
+--------------------------------------------------------------
+5.10 MedicalPPEMonitor (video/canlı izleme sınıfı)
+--------------------------------------------------------------
+FireSmokeMonitor ile paralel bir sınıf: YOLO track + sınıf eşiği +
+N-of-M (6/10) zamansal onay + kanıt kaydı (IhlalKayitlari/ +
+medikal_ihlal_log.csv). Kişi bir karede hiç görünmediyse pencereye
+0 da 1 de yazılmıyor (yangındaki "ıska=0" mantığından farklı — burada
+haksız yere aklamayı önlemek için).
+
+DOĞRULAMA: 28 birim testi yazıldı (hem sahte/stub model hem gerçek
+best.pt ile) — hepsi geçiyor. Ayrıca çalışan Streamlit sunucusunda
+gerçek test görüntüleriyle canlı olarak da doğrulandı.
+
+
+======================================================================
+6. ORTAK ARAYÜZ — app.py (1616 satır)
+======================================================================
+
+Dört modülü tek Streamlit uygulamasında birleştiren dosya. 4 ana sekme:
+  🚗 Plaka Tespiti | 🦺 Baret & Yelek Tespiti | 🔥 Yangın & Duman Tespiti
+  | 🧑‍⚕️ Tıbbi PPE
+Her sekmenin altında "Görsel" ve "Video (gerçek zamanlı)" alt sekmeleri
+var (video: örnek/kendi dosyan/IP Webcam telefon kamerası seçenekleri).
+
+METRİK GÖSTERİMİ (bu oturumda eklendi): her sekmenin en üstünde
+"📊 Metrikleri Hesapla / Test Et" butonu var. Butona basınca:
+  - Plaka  -> gerçek çok-geçişli pipeline'ı test setine karşı çalıştırıp
+             Ultralytics'in kendi AP matematiğiyle (ap_per_class,
+             box_iou) ölçer (birkaç dakika sürebilir).
+  - Fire / Medical -> kendi test setlerinde model.val() çalıştırır.
+  - Vest   -> yerelde test seti olmadığı için best.pt checkpoint'ine
+             gömülü eğitim-sonu değerleri okur (anında, kaynağı açıkça
+             belirtilir).
+Sonuçlar (Precision/Recall/F1/mAP50/mAP50-95) 5 sütunda gösterilir,
+altında bir "Sınıf bazlı değerler" açılır tablo (per-class kırılım)
+vardır. Sonuç st.session_state'te tutulur, yalnızca butona tekrar
+basılınca yeniden hesaplanır.
+
+Diğer ortak fonksiyonlar: dosya doğrulama (validate_image_upload/
+validate_video_upload), IP kamera bağlantı testi, video süresine göre
+otomatik ayarlanan slider, her model için ayrı @st.cache_resource
+yükleme fonksiyonu (model bir kez yüklenip önbelleğe alınıyor).
+
+
+======================================================================
+7. KULLANILAN TEKNOLOJİLER / KÜTÜPHANELER
+======================================================================
+
+  Python 3.13                — ana dil
+  Streamlit                  — web arayüzü (app.py)
+  Ultralytics YOLO11          — nesne tespiti (nano/small varyantlar,
+                                 model.track/predict/val)
+  PyTorch (CUDA)              — GPU hızlandırma (RTX 3060 Laptop, 6GB)
+  EasyOCR                     — plaka metni okuma
+  OpenCV (cv2)                — görüntü işleme (CLAHE, bilateral
+                                 filtre, morfolojik işlemler, çizim)
+  Roboflow (API + platform)   — veri seti kaynağı/indirme
+  pandas                      — CSV/tablo yönetimi
+  NumPy                       — sayısal işlemler, IoU/AP hesapları
+
+
+======================================================================
+8. ŞU ANKİ DURUM VE BEKLEYEN İŞLER
+======================================================================
+
+GIT DURUMU: FireAndSmoke refactor commit'i (cc160a2) push'lanmış
+durumda. Bu oturumdaki MedicalPPE modülünün TAMAMI ve app.py/
+.gitignore değişiklikleri HENÜZ COMMIT'LENMEDİ (kullanıcı istemedi).
+
+MedicalPPE'DE BEKLEYEN İŞ:
+  - train.py (imgsz 768, batch 12) ve genişletilmiş veri seti
+    (14375 eğitim görüntüsü) hazır ama eğitim henüz koşulmadı.
+  - best.pt hâlâ orijinal 640px modeldir (mAP50 80.0% test'te).
+  - Eğitim koşulup bittiğinde: test setinde karşılaştır -> iyiyse
+    yeni best.pt'yi devreye al -> evaluate.py ile DEFAULT_THRESHOLDS'ı
+    güncelle.
+  - C:\ppe_raw altındaki ham (birleştirilmemiş) Roboflow verisi hâlâ
+    diskte duruyor; işi bitince silinebilir.
+
+DİĞER MODÜLLER: PlateDetection, VestAndPlateDetection ve FireAndSmoke
+stabil durumda, aktif bir eğitim/değişiklik beklemiyorlar.

@@ -9,6 +9,7 @@ PlateDetection/.venv/
 
 # Python Cache
 **/__pycache__/
+**/*.cache
 
 # Weights (YOLO models - too large for GitHub)
 **/*.pt
@@ -33,3 +34,11 @@ FireAndSmoke/runs/
 FireAndSmoke/YanginKayitlari/
 FireAndSmoke/IslemGormusFotograflar/
 FireAndSmoke/*.zip
+
+# MedicalPPE: ham/birlestirilmis veri setleri, egitim ciktilari, kanit fotograflari
+MedicalPPE/raw_datasets/
+MedicalPPE/dataset/
+MedicalPPE/runs/
+MedicalPPE/IhlalKayitlari/
+# Roboflow API anahtari: repo public oldugu icin ASLA commit'lenmemeli
+MedicalPPE/.roboflow_key

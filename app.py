@@ -31,18 +31,21 @@ try:
     PLATE_DIR = Path(os.path.relpath(BASE_DIR / "PlateDetection", os.getcwd()))
     VEST_DIR = Path(os.path.relpath(BASE_DIR / "VestAndPlateDetection", os.getcwd()))
     FIRE_DIR = Path(os.path.relpath(BASE_DIR / "FireAndSmoke", os.getcwd()))
+    MED_DIR = Path(os.path.relpath(BASE_DIR / "MedicalPPE", os.getcwd()))
 except Exception:
     PLATE_DIR = Path("PlateDetection")
     VEST_DIR = Path("VestAndPlateDetection")
     FIRE_DIR = Path("FireAndSmoke")
+    MED_DIR = Path("MedicalPPE")
 
 sys.path.insert(0, str(PLATE_DIR))
 sys.path.insert(0, str(VEST_DIR))
 sys.path.insert(0, str(FIRE_DIR))
+sys.path.insert(0, str(MED_DIR))
 
 st.set_page_config(page_title="İyex Tespit Demo", layout="wide")
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff",".webp",".avif"}
 VIDEO_EXTS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
 
 
@@ -164,6 +167,272 @@ def video_duration_slider(video_path, key):
     return st.slider("İşlenecek video süresi (sn)", 5, 120, 20, key=f"{key}_fallback")
 
 
+# ─────────────────────────── HER MODELİN KENDİ DOĞRULUK METRİKLERİ ───────────────────────────
+# Statik/sabit değer YOK: her sekmedeki "Metrikleri Hesapla" butonu basıldığı
+# anda model.val() ile İLGİLİ TEST SETİNE karşı taze ölçüm yapılır. Böylece
+# yeni bir eğitimden sonra kod değişmeden güncel sonuç görülür. Sonuç
+# st.session_state'te tutulur ki sekmeler arası geçişte / diğer widget'lar
+# tetiklediği rerun'larda kaybolmasın (yalnızca butona tekrar basılınca
+# yeniden hesaplanır).
+
+def _metrics_from_val(metrics, source: str) -> dict:
+    """Genel özete ek olarak SINIF BAZLI değerleri de çıkarır.
+
+    metrics.box (Ultralytics'in DetMetrics/Metric nesnesi) zaten sınıf
+    başına precision/recall/AP dizilerini tutuyor (p, r, ap50, ap);
+    biz sadece okuyup F1'i (2PR/(P+R)) her sınıf için türetiyoruz —
+    aynı formülü genel özette de kullandığımız için tutarlı kalıyor.
+    """
+    box = metrics.box
+    per_class = []
+    for i, cls_idx in enumerate(box.ap_class_index):
+        p, r = float(box.p[i]), float(box.r[i])
+        f1 = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
+        per_class.append({
+            "Sınıf": metrics.names[int(cls_idx)],
+            "Precision": p,
+            "Recall": r,
+            "F1": f1,
+            "mAP50": float(box.ap50[i]),
+            "mAP50-95": float(box.ap[i]),
+        })
+    return {
+        "precision": float(box.mp),
+        "recall": float(box.mr),
+        "map50": float(box.map50),
+        "map50_95": float(box.map),
+        "source": source,
+        "per_class": per_class,
+    }
+
+
+def compute_plate_metrics() -> dict:
+    """Plaka modelini GERÇEK üretim pipeline'ıyla ölçer — düz model.val() DEĞİL.
+
+    NEDEN? Gerçek görsel modu (colab_local.process_single_image) tek geçişli
+    düz bir YOLO çağrısı yapmıyor: detect_plate_boxes() üç farklı ölçek/eşikte
+    (imgsz=1280/conf=0.25, 1920/0.10, 640/0.03) tarıyor, kutuları IoU ile
+    tekilleştiriyor, geometri filtresi (en/boy oranı, min genişlik/yükseklik)
+    uyguluyor; YOLO hiç bulamazsa detect_plate_classical() (klasik CV) devreye
+    giriyor. Düz model.val() bunların hiçbirini yapmadığı için ya gerçekte
+    yakalanan küçük/uzak plakaları kaçırmış (recall'ı olduğundan düşük), ya da
+    geometri filtresinin eleyeceği yanlış kutuları saymış (precision'ı farklı)
+    gösterirdi. Bu yüzden AYNI tespit fonksiyonlarını çağırıp yalnızca
+    Ultralytics'in AP/precision/recall matematiğini (ap_per_class, box_iou —
+    model.val()'ın kendi içinde kullandığı fonksiyonlar) bu özel tahminlere
+    uyguluyoruz.
+
+    NOT — CLAHE bu ölçüme dahil DEĞİL ve olmamalı: CLAHE yalnızca tespit
+    SONRASI, kırpılmış plakaya, OCR okuması için uygulanıyor (bkz.
+    colab_local.py process_plate_candidate). Kutu bulma başarısını (mAP/
+    precision/recall) etkilemiyor; OCR metin doğruluğu ayrı bir ölçüttür ve
+    bu fonksiyonun kapsamı dışında.
+    """
+    import numpy as np
+    import torch
+    from ultralytics import YOLO
+    from ultralytics.utils.metrics import ap_per_class, box_iou
+
+    # DİKKAT: mutlak (.resolve()) yol şart — birazdan os.chdir(PLATE_DIR)
+    # yapılınca PLATE_DIR göreceli bir string olduğu için (Türkçe karakterli
+    # dizin uyumluluğu, bkz. dosya başı) göreceli kalsaydı "PlateDetection/
+    # PlateDetection/..." diye YANLIŞLIKLA iç içe geçip glob'u sessizce
+    # boş döndürürdü (bu hata gerçek testte yakalandı).
+    test_dir = (PLATE_DIR / "Plate-Detection-2" / "test").resolve()
+    img_dir, lbl_dir = test_dir / "images", test_dir / "labels"
+    if not img_dir.exists():
+        raise FileNotFoundError(f"{img_dir} bulunamadı.")
+
+    cwd = os.getcwd()
+    os.chdir(PLATE_DIR)  # colab_local'ın best.pt/relatif yol varsayımlarıyla tutarlı olsun
+    try:
+        import colab_local
+        model = YOLO("best.pt")
+        device = "0" if torch.cuda.is_available() else "cpu"
+
+        iouv = np.linspace(0.5, 0.95, 10)  # Ultralytics'in standart 10 IoU eşiği (mAP50-95 için)
+        all_tp, all_conf = [], []
+        n_gt_total = 0
+
+        img_paths = sorted(p for p in img_dir.glob("*") if p.suffix.lower() in IMAGE_EXTS)
+        for img_path in img_paths:
+            frame = cv2.imread(str(img_path))
+            if frame is None:
+                continue
+            h, w = frame.shape[:2]
+
+            # ─── Gerçek doğru kutular (YOLO formatı → piksel xyxy) ───
+            gt_boxes = []
+            lbl_path = lbl_dir / f"{img_path.stem}.txt"
+            if lbl_path.exists():
+                for line in lbl_path.read_text().splitlines():
+                    parts = line.split()
+                    if len(parts) < 5:
+                        continue
+                    cx, cy, bw, bh = (float(v) for v in parts[1:5])
+                    cx, cy, bw, bh = cx * w, cy * h, bw * w, bh * h
+                    gt_boxes.append([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2])
+            n_gt_total += len(gt_boxes)
+
+            # ─── Gerçek pipeline'ın kendi tespiti (process_single_image ADIM 1 ile birebir aynı) ───
+            valid_boxes, _ = colab_local.detect_plate_boxes(model, frame, device)
+            if not valid_boxes:
+                classical = colab_local.detect_plate_classical(frame)
+                if classical:
+                    valid_boxes = [(x1, y1, x2, y2, 0.0, ar) for (x1, y1, x2, y2, _, ar) in classical]
+            if not valid_boxes:
+                continue  # bu görüntüde hiç tahmin yok; kaçırılan GT'ler zaten recall'a yansır
+
+            pred_boxes = torch.tensor([list(b[:4]) for b in valid_boxes], dtype=torch.float32)
+            confs = [b[4] for b in valid_boxes]
+
+            if gt_boxes:
+                iou = box_iou(torch.tensor(gt_boxes, dtype=torch.float32), pred_boxes).numpy()  # (n_gt, n_pred)
+            else:
+                iou = np.zeros((0, len(valid_boxes)))
+
+            # Ultralytics'in match_predictions'ıyla AYNI algoritma: her IoU eşiğinde
+            # en yüksek IoU'dan başlayarak hem gerçek kutu hem tahmin başına TEK eşleşme.
+            tp = np.zeros((len(valid_boxes), len(iouv)), dtype=bool)
+            for ti, thr in enumerate(iouv):
+                if iou.shape[0] == 0:
+                    continue
+                matches = np.array(np.nonzero(iou >= thr)).T  # [gt_idx, pred_idx] çiftleri
+                if matches.shape[0]:
+                    if matches.shape[0] > 1:
+                        order = iou[matches[:, 0], matches[:, 1]].argsort()[::-1]
+                        matches = matches[order]
+                        matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                        matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+                    tp[matches[:, 1], ti] = True
+
+            all_tp.append(tp)
+            all_conf.extend(confs)
+
+        if not all_tp:
+            raise ValueError("Test setinde hiç tahmin üretilemedi (gerçek pipeline hiçbir görüntüde plaka bulamadı).")
+
+        tp_arr = np.concatenate(all_tp, axis=0)
+        conf_arr = np.array(all_conf)
+        pred_cls = np.zeros(len(conf_arr), dtype=int)   # tek sınıf: plaka
+        target_cls = np.zeros(n_gt_total, dtype=int)
+
+        _, _, p, r, f1, ap, *_ = ap_per_class(tp_arr, conf_arr, pred_cls, target_cls)
+    finally:
+        os.chdir(cwd)
+
+    n_img = len(img_paths)
+    metrics_row = {
+        "Sınıf": "plaka", "Precision": float(p[0]), "Recall": float(r[0]),
+        "F1": float(f1[0]), "mAP50": float(ap[0, 0]), "mAP50-95": float(ap[0].mean()),
+    }
+    return {
+        "precision": float(p[0]),
+        "recall": float(r[0]),
+        "map50": float(ap[0, 0]),
+        "map50_95": float(ap[0].mean()),
+        "source": f"GERÇEK pipeline (çok geçişli tespit + geometri filtresi + klasik CV yedek), "
+                  f"test seti {n_img} görüntü — az önce ölçüldü",
+        "per_class": [metrics_row],
+    }
+
+
+def compute_vest_metrics() -> dict:
+    """VestAndPlateDetection için yerelde test seti yok; checkpoint'e gömülü
+    (eğitim sırasındaki son doğrulama) değerleri okur — model.val() koşmaz."""
+    import torch
+    weights = VEST_DIR / "best.pt"
+    if not weights.exists():
+        raise FileNotFoundError(f"{weights} bulunamadı.")
+    ckpt = torch.load(str(weights), map_location="cpu", weights_only=False)
+    tm = ckpt.get("train_metrics") or {}
+    if not tm:
+        raise ValueError("best.pt içinde train_metrics bulunamadı.")
+    return {
+        "precision": float(tm["metrics/precision(B)"]),
+        "recall": float(tm["metrics/recall(B)"]),
+        "map50": float(tm["metrics/mAP50(B)"]),
+        "map50_95": float(tm["metrics/mAP50-95(B)"]),
+        "source": "Eğitim sırasındaki son doğrulama (checkpoint'e gömülü) — "
+                  "yerelde ayrı bir test seti yok",
+    }
+
+
+def compute_fire_metrics() -> dict:
+    """FireAndSmoke modelini kendi test setinde (merged_dataset/test) ölçer."""
+    from ultralytics import YOLO
+    from FireAndSmokeVideo import find_latest_best_weights
+    data_yaml = FIRE_DIR / "merged_dataset" / "data.yaml"
+    if not data_yaml.exists():
+        raise FileNotFoundError(f"{data_yaml} bulunamadı.")
+    model = YOLO(find_latest_best_weights())
+    metrics = model.val(data=str(data_yaml), split="test", imgsz=640, plots=False, verbose=False)
+    n_img = len(list((FIRE_DIR / "merged_dataset" / "test" / "images").glob("*")))
+    return _metrics_from_val(metrics, f"Bağımsız test seti (merged_dataset/test, {n_img} görüntü) — az önce ölçüldü")
+
+
+def compute_medical_metrics() -> dict:
+    """MedicalPPE modelini kendi test setinde (dataset/test) ölçer."""
+    from ultralytics import YOLO
+    from MedicalPPEVideo import find_weights
+    data_yaml = MED_DIR / "dataset" / "data.yaml"
+    if not data_yaml.exists():
+        raise FileNotFoundError(
+            f"{data_yaml} bulunamadı. Önce MedicalPPE/prepare_dataset.py çalıştırılmalı."
+        )
+    model = YOLO(find_weights())
+    metrics = model.val(data=str(data_yaml), split="test", imgsz=640, plots=False, verbose=False)
+    n_img = len(list((MED_DIR / "dataset" / "test" / "images").glob("*")))
+    return _metrics_from_val(metrics, f"Bağımsız test seti (dataset/test, {n_img} görüntü) — az önce ölçüldü")
+
+
+MODEL_METRIC_COMPUTERS = {
+    "plate": compute_plate_metrics,
+    "vest": compute_vest_metrics,
+    "fire": compute_fire_metrics,
+    "medical": compute_medical_metrics,
+}
+
+
+def render_model_metrics(model_key):
+    """'Metrikleri Hesapla' butonu + (varsa) son ölçüm sonucunu 5 sütunda gösterir."""
+    state_key = f"metrics_{model_key}"
+    if st.button("📊 Metrikleri Hesapla / Test Et", key=f"{model_key}_metrics_btn"):
+        with st.spinner("Test seti üzerinde ölçülüyor (biraz sürebilir)..."):
+            try:
+                st.session_state[state_key] = MODEL_METRIC_COMPUTERS[model_key]()
+            except Exception as e:
+                st.session_state[state_key] = None
+                st.error(f"Metrik hesaplanamadı: {e}")
+
+    m = st.session_state.get(state_key)
+    if m:
+        p, r = m["precision"], m["recall"]
+        f1 = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
+        cols = st.columns(5)
+        cols[0].metric("Precision", f"{p * 100:.1f}%")
+        cols[1].metric("Recall", f"{r * 100:.1f}%")
+        cols[2].metric("F1", f"{f1 * 100:.1f}%")
+        cols[3].metric("mAP50", f"{m['map50'] * 100:.1f}%")
+        cols[4].metric("mAP50-95", f"{m['map50_95'] * 100:.1f}%")
+        st.caption(m["source"])
+
+        per_class = m.get("per_class")
+        if per_class:
+            with st.expander(f"Sınıf bazlı değerler ({len(per_class)} sınıf)"):
+                df = pd.DataFrame(per_class).set_index("Sınıf")
+                for col in ["Precision", "Recall", "F1", "mAP50", "mAP50-95"]:
+                    df[col] = (df[col] * 100).round(1)
+                st.dataframe(
+                    df.style.format("{:.1f}%"),
+                    width='stretch',
+                )
+        else:
+            # Vest gibi checkpoint'ten okunan modellerde sınıf bazlı veri yok
+            # (train_metrics yalnızca genel özeti saklıyor).
+            st.caption("Sınıf bazlı değerler bu model için mevcut değil.")
+
+
 # ─────────────────────────── PLAKA TESPİTİ: MODEL YÜKLEME ───────────────────────────
 
 @st.cache_resource(show_spinner="Plaka modeli ve OCR motoru yükleniyor (ilk seferde biraz sürer)...")
@@ -196,6 +465,29 @@ def load_fire_model():
     from ultralytics import YOLO
     from FireAndSmokeVideo import find_latest_best_weights
     return YOLO(find_latest_best_weights())
+
+
+def medical_weights_or_none():
+    """Tıbbi PPE model dosyası varsa yolunu, yoksa None döner.
+
+    Cache'lenmez ve her rerun'da çalışır (ucuz bir glob): model henüz
+    eğitimde olduğu için dosya SONRADAN gelecek; kullanıcı best.pt'yi
+    MedicalPPE/ klasörüne koyup sayfayla etkileşime geçtiği anda sekme
+    kendiliğinden aktifleşsin istiyoruz.
+    """
+    from MedicalPPEVideo import find_weights
+    try:
+        return find_weights()
+    except FileNotFoundError:
+        return None
+
+
+@st.cache_resource(show_spinner="Tıbbi PPE modeli yükleniyor...")
+def load_medical_model(weights_path):
+    """Ağırlık YOLUNA göre cache'ler: yeni bir eğitim (yeni yol) gelirse
+    eski cache'e takılmadan yeni model yüklenir."""
+    from ultralytics import YOLO
+    return YOLO(weights_path)
 
 
 # ─────────────────────────── PLAKA: GÖRSEL İŞLEME ───────────────────────────
@@ -569,17 +861,103 @@ def run_fire_video(video_path, izleyici, max_seconds, frame_ph, status_ph, table
     st.success(f"{kaynak} işleme tamamlandı — {olay_sayisi} onaylı yangın/duman olayı kaydedildi.")
 
 
+# ─────────────────────────── TIBBİ PPE: VİDEO ───────────────────────────
+
+def run_medical_video(video_path, izleyici, max_seconds, frame_ph, status_ph, table_ph, csv_path, frame_skip=5, live=False):
+    """Video/canlı akışta tıbbi PPE uyum izleme döngüsü.
+
+    İskelet run_fire_video ile birebir aynı (grab/retrieve, canlıda zaman
+    bazlı örnekleme, dosyada kare atlama). Fark: kareler
+    MedicalPPEVideo.MedicalPPEMonitor'a verilir; o da kişi takibi +
+    ekipman eşleştirme + N-of-M zamansal onay + kanıt kaydını kendi
+    içinde halleder. Alarm/bildirim yoktur — onaylanan ihlaller sadece
+    kaydedilir ve tabloda görünür.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        st.error("Video açılamadı." if not live else
+                 "Kameraya bağlanılamadı — telefon ve PC aynı Wi-Fi ağında mı? Adres doğru mu?")
+        return
+
+    if live:
+        # Canlı akışta tamponu küçült — eski kare birikmesin (detaylı
+        # açıklama run_plate_video içinde)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_no = -1
+    sample_idx = 0
+    ihlal_sayisi = 0
+    t0 = time.time()
+
+    # Canlı modda zaman tabanlı örnekleme (run_plate_video ile aynı mantık)
+    SAMPLE_PERIOD = 0.25
+    last_sample = -SAMPLE_PERIOD
+
+    def refresh_table():
+        try:
+            table_ph.dataframe(pd.read_csv(csv_path), width='stretch')
+        except (pd.errors.EmptyDataError, FileNotFoundError):
+            pass
+
+    try:
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            if live:
+                video_sec = time.time() - t0
+                if video_sec > max_seconds:
+                    break
+                if video_sec - last_sample < SAMPLE_PERIOD:
+                    continue
+                last_sample = video_sec
+            else:
+                frame_no += 1
+                if frame_no / fps > max_seconds:
+                    break
+                if frame_no % frame_skip != 0:
+                    continue
+                video_sec = frame_no / fps
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            sample_idx += 1
+
+            # Tüm izleme zekâsı (track + eşleştirme + N-of-M + kanıt) tek çağrıda:
+            cizili, yeni_ihlaller = izleyici.process_frame(frame, video_sec)
+            if yeni_ihlaller:
+                ihlal_sayisi += len(yeni_ihlaller)
+                refresh_table()
+
+            proc_fps = sample_idx / max(0.1, time.time() - t0)
+            cizili = _draw_corner_info(cizili, proc_fps)
+            frame_ph.image(cv2.cvtColor(cizili, cv2.COLOR_BGR2RGB), channels="RGB")
+            ozet = izleyici.get_status()
+            sure_metni = f"{video_sec:5.1f}s" if live else f"{video_sec:5.1f}s / {max_seconds:.0f}s"
+            status_ph.text(
+                f"Video: {sure_metni}   |   aktif iz: {ozet['active_tracks']}   |   "
+                f"onaylı ihlal: {ihlal_sayisi}"
+            )
+    finally:
+        cap.release()
+
+    kaynak = "Canlı yayın" if live else "Video"
+    st.success(f"{kaynak} işleme tamamlandı — {ihlal_sayisi} onaylı PPE ihlali kaydedildi.")
+
+
 # ═══════════════════════════════════════ ARAYÜZ ═══════════════════════════════════════
 
 st.title("İyex Tespit Demo")
 st.caption("Plaka okuma ve baret/yelek tespiti modellerini tarayıcıdan deneyin.")
 
-tab_plate, tab_vest, tab_fire = st.tabs(
-    ["🚗 Plaka Tespiti", "🦺 Baret & Yelek Tespiti", "🔥 Yangın & Duman Tespiti"]
+tab_plate, tab_vest, tab_fire, tab_med = st.tabs(
+    ["🚗 Plaka Tespiti", "🦺 Baret & Yelek Tespiti", "🔥 Yangın & Duman Tespiti", "🧑‍⚕️ Tıbbi PPE"]
 )
 
 # ───────────────────────────────── PLAKA TESPİTİ SEKMESİ ─────────────────────────────────
 with tab_plate:
+    render_model_metrics("plate")
     sub_img, sub_video = st.tabs(["Görsel", "Video (gerçek zamanlı)"])
 
     with sub_img:
@@ -755,6 +1133,7 @@ with tab_plate:
 
 # ───────────────────────────────── BARET & YELEK SEKMESİ ─────────────────────────────────
 with tab_vest:
+    render_model_metrics("vest")
     st.info(
         "VestAndPlateDetection klasöründe yalnızca eğitilmiş model dosyası (best.pt) var, "
         "örnek görsel/video bulunmuyor — kendi dosyanızı yükleyerek deneyebilirsiniz. "
@@ -849,6 +1228,7 @@ with tab_vest:
 
 # ───────────────────────────────── YANGIN & DUMAN SEKMESİ ─────────────────────────────────
 with tab_fire:
+    render_model_metrics("fire")
     st.info("Ekranda ince sarı kutu = aday, kalın kırmızı/turuncu kutu = onaylı yangın/duman.")
     # Sınıf bazlı eşikler: varsayılanlar evaluate.py'nin F1-Confidence
     # eğrisinden (bkz. FireAndSmokeVideo.py DEFAULT_THRESHOLDS) veriyle
@@ -1028,3 +1408,209 @@ with tab_fire:
                 cols_k = st.columns(3)
                 for i, p in enumerate(reversed(son_kanitlar)):
                     cols_k[i % 3].image(str(p), caption=p.name, width='stretch')
+
+
+# ───────────────────────────────── TIBBİ PPE SEKMESİ ─────────────────────────────────
+with tab_med:
+    render_model_metrics("medical")
+    med_weights = medical_weights_or_none()
+
+    if med_weights is None:
+        # Model henüz eğitimde: sekme hazır ama pasif. best.pt,
+        # MedicalPPE/ klasörüne kopyalandığı anda (herhangi bir etkileşimle
+        # gelen ilk rerun'da) aşağıdaki arayüz kendiliğinden açılır.
+        st.warning(
+            "Tıbbi PPE modeli henüz eğitimde. Eğitim bitince **best.pt** dosyasını "
+            "`MedicalPPE/` klasörüne kopyala — bu sekme kendiliğinden aktifleşecek. "
+            "Sonrasında `MedicalPPE/evaluate.py` ile sınıf bazlı eşikleri kalibre "
+            "etmeyi unutma (detay: MedicalPPE/README.md)."
+        )
+        st.button("Modeli tekrar ara", key="med_retry")
+    else:
+        st.info(
+            "İnce yeşil kutu = takılı ekipman, sarı = aday ihlal, kalın kırmızı = onaylı ihlal. "
+            "Denetlenen ekipmanlar modelin sınıflarından otomatik çıkarılır (eldiven, bone, önlük, gözlük...)."
+        )
+        med_model = load_medical_model(med_weights)
+        med_conf = st.slider(
+            "Tespit güven eşiği", 0.1, 0.9, 0.4, 0.05, key="med_conf",
+            help="Geçici genel eşik. evaluate.py çalıştırıp sınıf bazlı eşikleri "
+                 "MedicalPPEVideo.py'deki DEFAULT_THRESHOLDS'a yazınca oradaki "
+                 "değerler sınıf bazında önceliklidir.",
+        )
+
+        sub_img_m, sub_video_m = st.tabs(["Görsel", "Video (gerçek zamanlı)"])
+
+        with sub_img_m:
+            st.subheader("Görselde tıbbi PPE denetimi")
+            med_examples_dir = MED_DIR / "MedicalPPEExamples"
+            med_examples_dir.mkdir(parents=True, exist_ok=True)
+
+            source_img_m = st.radio(
+                "Kaynak",
+                ["Örnek klasördeki görselleri kullan (MedicalPPEExamples/)", "Kendi görselini yükle"],
+                key="med_img_source",
+            )
+
+            if source_img_m == "Örnek klasördeki görselleri kullan (MedicalPPEExamples/)":
+                new_examples_m = st.file_uploader(
+                    "MedicalPPEExamples/ klasörüne yeni görsel ekle (birden fazla seçilebilir)",
+                    type=sorted(e.strip(".") for e in IMAGE_EXTS),
+                    accept_multiple_files=True,
+                    key="med_examples_add",
+                )
+                if new_examples_m:
+                    eklenen_m = 0
+                    for nf in new_examples_m:
+                        ok, msg = validate_image_upload(nf)
+                        if ok:
+                            (med_examples_dir / nf.name).write_bytes(nf.getvalue())
+                            eklenen_m += 1
+                        else:
+                            st.error(f"{nf.name}: {msg}")
+                    if eklenen_m:
+                        st.success(f"{eklenen_m} görsel MedicalPPEExamples/ klasörüne eklendi.")
+                        st.session_state.pop("med_batch_results", None)
+                        st.rerun()
+
+                samples_m = sorted(p for p in med_examples_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+                if not samples_m:
+                    st.warning(f"'{med_examples_dir}' klasöründe örnek görsel bulunamadı. Yukarıdan ekleyebilirsin.")
+                else:
+                    st.caption(f"'{med_examples_dir}' klasöründeki {len(samples_m)} görsel:")
+                    preview_cols_m = st.columns(6)
+                    for i, p in enumerate(samples_m):
+                        preview_cols_m[i % 6].image(str(p), caption=p.name, width='stretch')
+
+                    if st.button(f"Tüm örnek görselleri işle ({len(samples_m)} adet)", key="med_batch_run"):
+                        from MedicalPPEVideo import process_photo as med_process_photo
+                        batch_results_m = []
+                        with st.spinner(f"{len(samples_m)} görsel işleniyor..."):
+                            for p in samples_m:
+                                frame_bm = cv2.imread(str(p))
+                                annotated_bm, counts_bm, viol_bm = med_process_photo(
+                                    med_model, frame_bm, default_conf=med_conf,
+                                )
+                                batch_results_m.append((p.name, annotated_bm, counts_bm, viol_bm))
+                        st.session_state["med_batch_results"] = batch_results_m
+
+                if st.session_state.get("med_batch_results"):
+                    st.divider()
+                    st.subheader("Toplu işleme sonuçları")
+                    for name, annotated_bm, counts_bm, viol_bm in st.session_state["med_batch_results"]:
+                        ozet_m = "; ".join(viol_bm) if viol_bm else (counts_bm if counts_bm else "tespit yok")
+                        with st.expander(f"{name} — {ozet_m}"):
+                            st.image(cv2.cvtColor(annotated_bm, cv2.COLOR_BGR2RGB), width='stretch')
+                            if viol_bm:
+                                st.error(" | ".join(viol_bm))
+            else:
+                uploaded_mi = st.file_uploader("Görsel yükle", type=sorted(e.strip(".") for e in IMAGE_EXTS), key="med_img_upload")
+                image_path_m = None
+                if uploaded_mi is not None:
+                    ok, msg = validate_image_upload(uploaded_mi)
+                    if not ok:
+                        st.error(msg)
+                    else:
+                        image_path_m = save_upload_to_temp(uploaded_mi)
+                        st.image(image_path_m, caption="Yüklenen görsel", width=400)
+
+                if image_path_m and st.button("Denetle", key="med_img_run"):
+                    from MedicalPPEVideo import process_photo as med_process_photo
+                    frame_m = cv2.imread(image_path_m)
+                    with st.spinner("İşleniyor..."):
+                        annotated_m, counts_m, viol_m = med_process_photo(
+                            med_model, frame_m, default_conf=med_conf,
+                        )
+                    st.image(cv2.cvtColor(annotated_m, cv2.COLOR_BGR2RGB), caption="Denetim sonucu", width='stretch')
+                    st.write(counts_m if counts_m else "Hiçbir nesne tespit edilmedi.")
+                    if viol_m:
+                        st.error(" | ".join(viol_m))
+                    elif counts_m:
+                        st.success("Anlık ihlal görünmüyor.")
+
+        with sub_video_m:
+            st.subheader("Videoda gerçek zamanlı tıbbi PPE izleme")
+            source_m = st.radio(
+                "Kaynak",
+                ["Video yükle", "Telefon kamerası (IP Webcam)"],
+                key="med_vid_source",
+            )
+
+            video_path_m = None
+            is_live_m = False
+            if source_m == "Video yükle":
+                uploaded_mv = st.file_uploader("Video yükle", type=sorted(e.strip(".") for e in VIDEO_EXTS), key="med_vid_upload")
+                if uploaded_mv is not None:
+                    ok, msg, tmp_path = validate_video_upload(uploaded_mv)
+                    if not ok:
+                        st.error(msg)
+                    else:
+                        video_path_m = tmp_path
+            else:
+                is_live_m = True
+                video_path_m = ip_camera_input("med_ip_url")
+
+            if is_live_m:
+                max_seconds_m = float("inf")
+                st.caption("Süre sınırı yok — durdurmak için sağ üstteki **Stop** düğmesine bas.")
+            else:
+                max_seconds_m = video_duration_slider(video_path_m, "med_vid_seconds")
+
+            if video_path_m and st.button("İzlemeyi Başlat", key="med_vid_run"):
+                baglanti_ok_m = True
+                if is_live_m:
+                    with st.spinner("Telefon kamerasına bağlanılıyor..."):
+                        baglanti_ok_m = check_ip_camera(video_path_m)
+                    if not baglanti_ok_m:
+                        st.error(
+                            f"'{video_path_m}' adresinden görüntü alınamadı. Kontrol et: "
+                            "telefonda 'Start server' basılı mı, iki cihaz aynı Wi-Fi'da mı, "
+                            "adres telefon ekranındakiyle aynı mı?"
+                        )
+                if baglanti_ok_m:
+                    from MedicalPPEVideo import MedicalPPEMonitor
+                    # Her izleme oturumu İÇİN YENİ izleyici: iz geçmişi (N-of-M
+                    # pencereleri) temiz başlar; model ise cache'ten paylaşılır.
+                    med_izleyici = MedicalPPEMonitor(
+                        model=med_model,
+                        default_conf=med_conf,
+                        record_dir=str(MED_DIR / "IhlalKayitlari"),
+                        csv_path=str(MED_DIR / "medikal_ihlal_log.csv"),
+                    )
+                    st.caption(
+                        f"İzleme modu: **{med_izleyici.mode}** — denetlenen ekipman: "
+                        f"{', '.join(sorted(med_izleyici.required_items)) or '-'}"
+                    )
+                    if med_izleyici.mode == "presence":
+                        st.warning(
+                            "Modelde ne kişi ne de no_* sınıfı var; ihlal çıkarımı yapılamaz, "
+                            "yalnızca tespitler gösterilir (detay: MedicalPPE/README.md)."
+                        )
+                    frame_ph_m = st.empty()
+                    status_ph_m = st.empty()
+                    st.markdown("**Onaylanan PPE ihlalleri:**")
+                    table_ph_m = st.empty()
+                    run_medical_video(
+                        video_path_m, med_izleyici, float(max_seconds_m),
+                        frame_ph_m, status_ph_m, table_ph_m,
+                        csv_path=str(MED_DIR / "medikal_ihlal_log.csv"),
+                        live=is_live_m,
+                    )
+
+        st.divider()
+        st.subheader("İhlal kayıtları (medikal_ihlal_log.csv)")
+        med_log_path = MED_DIR / "medikal_ihlal_log.csv"
+        if med_log_path.exists():
+            st.dataframe(pd.read_csv(med_log_path), width='stretch')
+        else:
+            st.info("Henüz kayıt yok.")
+
+        # Son kanıt fotoğrafları: onaylanan ihlallerin anotasyonlu kareleri
+        kayit_dir_m = MED_DIR / "IhlalKayitlari"
+        if kayit_dir_m.exists():
+            son_kanitlar_m = sorted(kayit_dir_m.glob("*.jpg"), key=lambda p: p.stat().st_mtime)[-6:]
+            if son_kanitlar_m:
+                st.subheader("Son kanıt fotoğrafları")
+                cols_km = st.columns(3)
+                for i, p in enumerate(reversed(son_kanitlar_m)):
+                    cols_km[i % 3].image(str(p), caption=p.name, width='stretch')
