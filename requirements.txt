@@ -1,0 +1,29 @@
+# İyex — Python bağımlılıkları
+#
+# torch/torchvision/torchaudio NVIDIA GPU (CUDA 12.6 uyumlu) içindir.
+# Kurulum sırası ve GPU'suz (CPU) alternatif için KURULUM.txt'ye bak —
+# bu dosyayı doğrudan "pip install -r requirements.txt" ile kurmak
+# GPU'lu makinede EK bir --extra-index-url bayrağı gerektirir.
+
+# --- Çekirdek: nesne tespiti ---
+ultralytics==8.4.90
+torch==2.12.1+cu126
+torchvision==0.27.1+cu126
+torchaudio==2.11.0+cu126
+
+# --- Çekirdek: plaka OCR ---
+easyocr==1.7.2
+
+# --- Görüntü/veri işleme ---
+opencv-python==4.10.0.84
+numpy==2.3.5
+pillow==12.2.0
+pillow-avif-plugin==1.5.5
+
+# --- Arayüz ---
+streamlit==1.59.1
+pandas==3.0.3
+
+# --- Veri seti hazırlama (prepare_dataset.py'ler) ---
+PyYAML==6.0.2
+roboflow==1.3.12

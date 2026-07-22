@@ -1,0 +1,178 @@
+======================================================================
+İYEX — KURULUM REHBERİ (başka bir bilgisayarda çalıştırmak için)
+======================================================================
+
+Bu proje 4 bağımsız tespit modülünü (Plaka, Baret&Yelek, Yangın&Duman,
+Tıbbi PPE) tek bir Streamlit arayüzünde birleştirir. Aşağıdaki adımlar
+Windows için yazıldı (proje Windows'ta geliştirildi); Linux/Mac'te
+aynı mantık geçerlidir, sadece komutlar (özellikle venv aktivasyonu ve
+yol ayraçları) farklıdır.
+
+----------------------------------------------------------------------
+1. GEREKSİNİMLER
+----------------------------------------------------------------------
+
+  - Python 3.13 (proje bu sürümle geliştirildi/test edildi)
+  - (Opsiyonel ama önerilir) NVIDIA GPU + güncel sürücü — CUDA 12.6
+    uyumlu bir sürücü olması yeterli, CUDA Toolkit'i ayrıca kurmana
+    GEREK YOK (torch paketi kendi CUDA çalışma zamanını içeriyor).
+    GPU yoksa proje CPU'da da çalışır, sadece belirgin şekilde yavaştır
+    (özellikle video izleme ve MedicalPPE'nin dilimli fotoğraf modu).
+  - ~10 GB boş disk (bağımlılıklar + modeller + örnek veriler).
+  - (Yalnızca yeniden eğitim/veri indirme yapacaksan) bir Roboflow
+    hesabı ve API anahtarı — günlük kullanım (arayüzü açıp tespit
+    yapmak) için GEREKMİYOR.
+
+----------------------------------------------------------------------
+2. SANAL ORTAM (venv) KURULUMU
+----------------------------------------------------------------------
+
+Proje TEK bir sanal ortam kullanıyor: PlateDetection/.venv altında.
+Diğer üç modül de (VestAndPlateDetection, FireAndSmoke, MedicalPPE) bu
+ortamı paylaşır — app.py hepsini aynı Python sürecinde çalıştırır.
+
+PowerShell'de proje kök klasöründeyken:
+
+    py -3.13 -m venv PlateDetection\.venv
+    PlateDetection\.venv\Scripts\Activate.ps1
+
+(Activate.ps1 çalışmazsa: PowerShell'i yönetici olarak açıp bir kez
+ "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" çalıştırman
+ gerekebilir — Windows'un imzasız script'leri varsayılan engellemesi.)
+
+----------------------------------------------------------------------
+3. BAĞIMLILIKLARIN KURULMASI
+----------------------------------------------------------------------
+
+GPU'lu (NVIDIA, CUDA 12.6 uyumlu) makinede:
+
+    pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu126
+
+GPU YOKSA (CPU'da çalıştıracaksan):
+
+    pip install -r requirements.txt --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu
+
+(İki durumda da requirements.txt'deki torch/torchvision/torchaudio
+satırları "+cu126" etiketiyle pinlenmiş; CPU'da bu etiketi taşıyan
+paket bulunamaz. O yüzden CPU'da kuracaksan requirements.txt içindeki
+üç torch satırının SONUNDAKİ "+cu126" ibaresini silip (sadece
+"torch==2.12.1" gibi) tekrar dene, ya da o üç satırı dosyadan çıkarıp
+"pip install torch torchvision torchaudio" ile ayrıca CPU sürümünü kur.)
+
+Kurulum bittiğinde doğrula:
+
+    python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+GPU'lu makinede "True" görmelisin. "False" görüyorsan ama GPU'n varsa,
+muhtemelen driver/CUDA sürüm uyuşmazlığı var — NVIDIA sürücünü
+güncelle ve tekrar dene.
+
+----------------------------------------------------------------------
+4. MODEL DOSYALARI — ÖNEMLİ, BUNU ATLAMA
+----------------------------------------------------------------------
+
+Git deposu BÜYÜK model dosyalarının çoğunu (.gitignore ile "**/*.pt")
+hariç tutuyor; bazıları istisnai olarak elle depoya eklenmiş. Şu an
+depoda GERÇEKTEN bulunanlar ile EKSİK olanlar:
+
+  MedicalPPE/best.pt                                  → depoda VAR (v1 model)
+  FireAndSmoke/runs/detect/fire_smoke_yolo11-4/...     → depoda VAR (eski nano deneme)
+  FireAndSmoke/runs/detect/fire_smoke_yolo11s/...      → depoda VAR (eski, D-Fire'sız deneme)
+  FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/...→ DEPODA YOK — ama kod bunu
+                                                          otomatik en iyi model sanıp
+                                                          seçmeye çalışacak konumda!
+  VestAndPlateDetection/best.pt                        → DEPODA YOK — bu modül
+                                                          BAŞKA hiçbir dosyaya
+                                                          bakmıyor, doğrudan bu
+                                                          yola bakıyor.
+
+SONUÇ: sadece "git clone" ile başka bir bilgisayara taşırsan:
+  - 🦺 Baret & Yelek sekmesi FileNotFoundError ile PATLAR (best.pt yok).
+  - 🔥 Yangın & Duman sekmesi ÇALIŞIR ama en iyi (D-Fire ile eğitilmiş)
+    modeli DEĞİL, eski/daha zayıf bir modeli SESSİZCE kullanır (kod
+    "en son bulduğum best.pt" mantığıyla mevcut olanlardan birini seçer,
+    hata vermez — bu yüzden fark etmesi zor).
+
+BUNU ÇÖZMEK İÇİN: bu iki dosyayı KAYNAK BİLGİSAYARDAN elle kopyala:
+    FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/weights/best.pt
+    VestAndPlateDetection/best.pt
+Aynı göreli yola (yukarıdaki gibi) yapıştır. İkisi de birkaç on MB.
+
+(Not: MedicalPPE modülünde bu sorun yok, MedicalPPE/best.pt zaten
+ depoda; ayrıca yedek MedicalPPE/best_v1_640px_2026-07-16.pt de VAR.)
+
+----------------------------------------------------------------------
+5. (OPSİYONEL) ROBOFLOW API ANAHTARI
+----------------------------------------------------------------------
+
+Yalnızca MedicalPPE/prepare_dataset.py veya FireAndSmoke/prepare_dataset.py
+çalıştırıp veri setini SIFIRDAN indirmek istersen gerekir. Günlük
+kullanımda (arayüzü açıp mevcut modellerle tespit yapmak) GEREKMEZ.
+
+Gerekirse:
+  1) https://app.roboflow.com hesabından Settings → Roboflow API'den
+     kendi anahtarını al.
+  2) PowerShell'de:  $env:ROBOFLOW_API_KEY = "senin-anahtarin"
+     (kalıcı olması için Windows ortam değişkenlerine ekle)
+  ya da
+  2b) MedicalPPE/.roboflow_key adında, içinde SADECE anahtarın olduğu
+      bir dosya oluştur (bu dosya .gitignore'da, asla commit'lenmez).
+
+ASLA anahtarı koda gömme / .py dosyasına yapıştırma — bu depo public
+GitHub'da, koda gömülen her şey herkese açık olur.
+
+----------------------------------------------------------------------
+6. ÇALIŞTIRMA
+----------------------------------------------------------------------
+
+En kolay yol — proje kökünde calistir.bat'a çift tıkla, ya da:
+
+    PlateDetection\.venv\Scripts\python.exe -m streamlit run app.py
+
+Tarayıcıda http://localhost:8501 otomatik açılır. İlk açılışta her
+modül modelini yükler (birkaç saniye sürebilir); modeller
+@st.cache_resource ile önbelleğe alındığı için sonraki kullanımlar
+hızlıdır.
+
+----------------------------------------------------------------------
+7. SIK KARŞILAŞILAN HATALAR
+----------------------------------------------------------------------
+
+  "FileNotFoundError: ...best.pt bulunamadı"
+      → §4'teki eksik model dosyası sorunu. Doğru best.pt'yi doğru
+        klasöre kopyala.
+
+  "CUDA out of memory" (video/eğitim sırasında)
+      → GPU VRAM'i yetersiz. Streamlit'i kapatıp tekrar aç (VRAM
+        temizlenir); MedicalPPE/FireAndSmoke video modunda aynı anda
+        birden çok ağır işlem (eğitim + canlı izleme gibi) çalıştırma.
+
+  Windows'ta "FileNotFoundError" / çok uzun dosya yolu hatası
+      (özellikle prepare_dataset.py çalıştırırken)
+      → Windows'un 260 karakterlik MAX_PATH sınırı. Projeyi C:\ gibi
+        kısa, Türkçe karaktersiz bir yola taşımak (Masaüstü yerine)
+        bu hatayı büyük ölçüde azaltır. MedicalPPE/prepare_dataset.py
+        zaten ham veriyi C:\ppe_raw gibi kısa bir yola indirir; kendi
+        eğitim scriptini yazarsan aynı deseni izle.
+
+  Streamlit "ModuleNotFoundError" (colab_local, MedicalPPEVideo vb.)
+      → app.py'yi PlateDetection/.venv İÇİNDEKİ python ile
+        çalıştırdığından emin ol (bkz. §6); başka bir Python/venv ile
+        çalıştırırsan modül yolları (sys.path.insert) doğru
+        eklenmemiş olabilir.
+
+  torch.cuda.is_available() False dönüyor ama GPU'n var
+      → NVIDIA sürücünü güncelle; ya da requirements.txt'yi CPU
+        sürümüyle kurmuş olabilirsin (§3'ü tekrar kontrol et).
+
+----------------------------------------------------------------------
+Dosya haritası (kurulumla ilgili)
+----------------------------------------------------------------------
+  requirements.txt   → pip bağımlılık listesi (bu dosyayla birlikte)
+  calistir.bat        → arayüzü tek tıkla başlatan Windows script'i
+  PROJE_RAPORU.txt     → projenin tüm teknik anlatısı (kurulumdan sonra
+                         okumak için)
+  MedicalPPE/TEKNIK_RAPOR.md
+  FireAndSmoke/TEKNIK_RAPOR.md
+  VestAndPlateDetection/TEKNIK_RAPOR.md
+                       → her modülün kendi teknik detayları
