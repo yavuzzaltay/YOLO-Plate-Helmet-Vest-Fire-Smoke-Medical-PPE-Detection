@@ -424,6 +424,47 @@ VİDEODA KAPALI: hız bütçesi + zamansal N-of-M zaten kaçan kareyi
 telafi ettiği için gerek görülmedi.
 
 --------------------------------------------------------------
+5.8b DENENEN VE REDDEDİLEN: best_model_v2 (2026-07-22)
+--------------------------------------------------------------
+Kullanıcı yeni bir eğitim çıktısı (best_model_v2.zip) verdi; sabit 535
+görüntülük test setinde v1 ile kıyaslandı ve REDDEDİLDİ:
+  - mAP50-95: 14 sınıfın 13'ünde v1'den KÖTÜ
+  - Recall: 10 sınıfta kötü (no-surgical-cap 0.697->0.544,
+    no-medical-attire 0.740->0.652, coverall 0.904->0.785)
+  - mAP50: 10 sınıfta kötü; Precision: 8 sınıfta iyi (tek artısı)
+  - Ek bulgu: alakasız sahnede (yangın fotoğrafı) düşük eşikte sahte
+    "eldiven yok" alarmı — v1'de yok.
+best.pt v1'e geri döndürüldü (yedek: best_v1_640px_2026-07-16.pt).
+Tam 14 sınıf x 4 metrik tablosu MedicalPPE/README.md'de.
+DERS: model kıyasında TEK metriğe bakılmaz; 4 metrik + sınıf bazında
+tablo + alakasız-sahne sağlamlık testi standart prosedür oldu.
+
+--------------------------------------------------------------
+5.8c ÇIKARIM-ZAMANI İYİLEŞTİRME TURU (2026-07-22, ölçülmüş)
+--------------------------------------------------------------
+Checkpoint commit (36c3b59) sonrası, aynı test setinde 3 deney:
+  1) Tam kare cozunurlugu 768/960'a cikarmak: REDDEDILDI.
+     Kucuk siniflar +3..+7 kazanirken buyukler -3..-7 kaybediyor
+     (face-shield 0.943->0.895, person 0.917->0.848); genel mAP50-95
+     640'ta en iyi (0.4793 vs 0.4743/0.4237). Egitim 640'taydi;
+     olcek uyusmazligi. Tam kare 640'ta kaldi.
+  2) Dilim izgarasini 3x3 yapmak: REDDEDILDI. Genel mAP50
+     0.790->0.786, sure 2 kat. 640px kaynakta 3x3 dilim 246px kaliyor,
+     2.6x buyutme bulanikliga donusuyor.
+  3) Dilimleri 768'de kosmak (TILE_IMGSZ, tam kare 640 kalirken):
+     KABUL. Genel mAP50 0.7902->0.7920, mAP50-95 0.4708->0.4723,
+     en zayif sinif no-surgical-gloves +2.0 puan (0.455->0.475);
+     pozitifler birebir korundu; sure 115s->137s (fotograf modu).
+
+Ek olarak FOTOGRAF hattina ozel esik seti (PHOTO_THRESHOLDS) eklendi:
+gercek hattin (TTA+dilim) F1 egrisi olculunce tepe noktalarinin
+model.val tabanli eskilerden ortalama +0.15 yuksek oldugu goruldu
+(TTA dogru tespitlerin guvenini yukseltiyor). process_photo artik bu
+seti kullaniyor; videoda TTA/dilim olmadigi icin DEFAULT_THRESHOLDS
+video hattinda gecerli kaldi. Yan fayda: alakasiz sahnede yanlis
+alarm riski de dusuyor.
+
+--------------------------------------------------------------
 5.9 Bulunan ve düzeltilen hatalar
 --------------------------------------------------------------
   1) Çifte ihlal raporu: process_photo, model "direct" modda (negatif
@@ -468,7 +509,10 @@ METRİK GÖSTERİMİ (bu oturumda eklendi): her sekmenin en üstünde
   - Plaka  -> gerçek çok-geçişli pipeline'ı test setine karşı çalıştırıp
              Ultralytics'in kendi AP matematiğiyle (ap_per_class,
              box_iou) ölçer (birkaç dakika sürebilir).
-  - Fire / Medical -> kendi test setlerinde model.val() çalıştırır.
+  - Fire   -> kendi test setinde model.val() çalıştırır.
+  - Medical-> (2026-07-22'den beri) GERÇEK fotoğraf hattını (TTA +
+             dilimli tespit) test setinde ölçer; ilerleme çubuğu ile
+             (MedicalPPEVideo.evaluate_pipeline, ~2-3 dk).
   - Vest   -> yerelde test seti olmadığı için best.pt checkpoint'ine
              gömülü eğitim-sonu değerleri okur (anında, kaynağı açıkça
              belirtilir).
@@ -504,17 +548,24 @@ yükleme fonksiyonu (model bir kez yüklenip önbelleğe alınıyor).
 8. ŞU ANKİ DURUM VE BEKLEYEN İŞLER
 ======================================================================
 
-GIT DURUMU: FireAndSmoke refactor commit'i (cc160a2) push'lanmış
-durumda. Bu oturumdaki MedicalPPE modülünün TAMAMI ve app.py/
-.gitignore değişiklikleri HENÜZ COMMIT'LENMEDİ (kullanıcı istemedi).
+GIT DURUMU: MedicalPPE modülünün tamamı, PROJE_RAPORU.txt ve app.py
+metrik özelliği 36c3b59 checkpoint commit'inde. Sonrasındaki
+çıkarım-zamanı iyileştirme turu (TILE_IMGSZ 768, PHOTO_THRESHOLDS,
+evaluate_pipeline) ayrı bir commit'te.
 
 MedicalPPE'DE BEKLEYEN İŞ:
-  - train.py (imgsz 768, batch 12) ve genişletilmiş veri seti
-    (14375 eğitim görüntüsü) hazır ama eğitim henüz koşulmadı.
-  - best.pt hâlâ orijinal 640px modeldir (mAP50 80.0% test'te).
-  - Eğitim koşulup bittiğinde: test setinde karşılaştır -> iyiyse
-    yeni best.pt'yi devreye al -> evaluate.py ile DEFAULT_THRESHOLDS'ı
-    güncelle.
+  - EN BÜYÜK KALAN KALDIRAÇ: train.py (imgsz 768, batch 12) ve
+    genişletilmiş veri seti (14375 eğitim görüntüsü; zayıf negatif
+    sınıflara 10-15x veri) hazır ama eğitim henüz koşulmadı — çok
+    saatlik GPU işi olduğu için kullanıcı onayı bekliyor.
+  - best.pt hâlâ orijinal 640px v1 modelidir (test mAP50 %80.0;
+    gerçek fotoğraf hattı dilim-768 ile mAP50 %79.2 — bu iki sayı
+    farklı ölçümlerdir: val vs TTA+dilim hattı, karıştırma).
+  - Eğitim koşulup bittiğinde standart prosedür: 535'lik sabit test
+    setinde 4 metrik x 14 sınıf tablosu + alakasız-sahne sağlamlık
+    testi -> iyiyse devreye al -> evaluate.py (video eşikleri) ve
+    evaluate_pipeline F1 tepeleri (fotoğraf eşikleri) ile yeniden
+    kalibre et.
   - C:\ppe_raw altındaki ham (birleştirilmemiş) Roboflow verisi hâlâ
     diskte duruyor; işi bitince silinebilir.
 

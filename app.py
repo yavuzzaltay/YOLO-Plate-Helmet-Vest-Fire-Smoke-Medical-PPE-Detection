@@ -372,18 +372,35 @@ def compute_fire_metrics() -> dict:
 
 
 def compute_medical_metrics() -> dict:
-    """MedicalPPE modelini kendi test setinde (dataset/test) ölçer."""
+    """MedicalPPE'nin GERÇEK fotoğraf hattını kendi test setinde ölçer.
+
+    model.val() değil: üretimde fotoğraf TTA + dilimli tespit katmanlarından
+    geçiyor; kullanıcıya gösterilen metrik de o hattın metriği olmalı
+    (plaka modülündeki ilkenin aynısı). Ölçüm matematiği yine Ultralytics'in
+    (ap_per_class) — ayrıntı MedicalPPEVideo.evaluate_pipeline'da.
+    """
     from ultralytics import YOLO
-    from MedicalPPEVideo import find_weights
-    data_yaml = MED_DIR / "dataset" / "data.yaml"
-    if not data_yaml.exists():
+    from MedicalPPEVideo import find_weights, evaluate_pipeline
+    img_dir = MED_DIR / "dataset" / "test" / "images"
+    lbl_dir = MED_DIR / "dataset" / "test" / "labels"
+    if not img_dir.exists():
         raise FileNotFoundError(
-            f"{data_yaml} bulunamadı. Önce MedicalPPE/prepare_dataset.py çalıştırılmalı."
+            f"{img_dir} bulunamadı. Önce MedicalPPE/prepare_dataset.py çalıştırılmalı."
         )
     model = YOLO(find_weights())
-    metrics = model.val(data=str(data_yaml), split="test", imgsz=640, plots=False, verbose=False)
-    n_img = len(list((MED_DIR / "dataset" / "test" / "images").glob("*")))
-    return _metrics_from_val(metrics, f"Bağımsız test seti (dataset/test, {n_img} görüntü) — az önce ölçüldü")
+    bar = st.progress(0.0, text="Gerçek hat (TTA + dilimli) test setinde ölçülüyor...")
+    result = evaluate_pipeline(
+        model, img_dir, lbl_dir,
+        progress_cb=lambda done, total: bar.progress(
+            done / total, text=f"Gerçek hat ölçülüyor... {done}/{total} görüntü"),
+    )
+    bar.empty()
+    n_img = len(list(img_dir.glob("*")))
+    result["source"] = (
+        f"Bağımsız test seti ({n_img} görüntü) — GERÇEK hat (TTA + dilimli tespit) "
+        f"ile az önce ölçüldü"
+    )
+    return result
 
 
 MODEL_METRIC_COMPUTERS = {

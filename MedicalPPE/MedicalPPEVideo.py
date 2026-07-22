@@ -240,6 +240,32 @@ DEFAULT_THRESHOLDS = {
     "coverall": 0.18,
 }
 
+# FOTOĞRAF hattının kendi eşikleri. NEDEN AYRI SET: fotoğraf modunda
+# tespit TTA + dilimli geçişlerden geçiyor; TTA doğru tespitlerin güvenini
+# sistematik yükseltiyor ve F1 eğrisinin tepesi sağa kayıyor (2026-07-22,
+# 535 görüntülük testte GERÇEK hattın F1 eğrisinden ölçüldü — ortalama
+# +0.15). Video hattında TTA/dilim YOK; oradaki güven dağılımı düz
+# model.val'e yakın olduğundan video DEFAULT_THRESHOLDS ile kalır.
+# Eşiklerin yüksek olması, alakasız sahnelerde (v2 denemesinde görülen
+# "yangın fotoğrafında eldiven-yok alarmı" türü) yanlış alarm riskini de
+# ayrıca azaltır.
+PHOTO_THRESHOLDS = {
+    "person": 0.42,
+    "surgical-cap": 0.50,
+    "no-surgical-cap": 0.37,
+    "surgical-gloves": 0.54,
+    "no-surgical-gloves": 0.49,
+    "surgical-mask": 0.47,
+    "surgical-gown": 0.51,
+    "shoe-covers": 0.48,
+    "surgical-scrubs": 0.35,
+    "face-shield": 0.63,
+    "no-facial-gear": 0.47,
+    "no-medical-attire": 0.60,
+    "goggles": 0.56,
+    "coverall": 0.55,
+}
+
 # N-of-M ihlal onayı: son M örnekleme karesinin en az N'inde ihlal.
 # Yangına (4/8) göre daha temkinli (6/10): kol/el oklüzyonu tek karelik
 # sahte "eldiven yok" üretebilir; 4 Hz örneklemede bu ~1.5 sn kanıt demek.
@@ -309,6 +335,18 @@ TILE_MAX_AREA_FRAC = 0.05
 # İç dilim kenarına bu kadar yaklaşan kutu "kesilmiş nesne" sayılıp atılır
 # (kare sınırındaki kenarlar hariç — orada kutu meşru olarak kenara değer).
 TILE_EDGE_MARGIN = 4
+# Dilim geçişlerinin model giriş boyutu. Tam kare 640'ta kalırken dilimi
+# daha büyük koşmak, yakınlaştırma kazancını YALNIZCA küçük nesne geçişine
+# uygular. ÖLÇÜLMÜŞ KARAR (2026-07-22, 535 görüntülük test):
+#   • tam kareyi 768/960'a çıkarmak: küçük sınıflar +3..+7 ama büyük
+#     sınıflar -3..-7 (face-shield 0.943->0.895, person 0.917->0.848)
+#     ve genel mAP50-95 düşüyor -> REDDEDİLDİ
+#   • 3x3 ızgara (dilim 640): 246px dilim 2.6x büyütülünce bulanıyor,
+#     genel mAP50 0.790->0.786 -> REDDEDİLDİ
+#   • 2x2 ızgara + dilim 768 (bu ayar): genel mAP50 0.790->0.792,
+#     mAP50-95 0.471->0.472, en zayıf sınıf no-surgical-gloves +2.0
+#     puan; hiçbir sınıf 0.2 puandan fazla gerilemedi -> KABUL
+TILE_IMGSZ = 768
 
 
 def _iter_tiles(frame):
@@ -349,7 +387,7 @@ def _tile_detections(model, frame, class_map, min_conf):
     detections = []
     for crop, ox, oy in _iter_tiles(frame):
         th, tw = crop.shape[:2]
-        result = model.predict(crop, conf=min_conf, imgsz=640, verbose=False)[0]
+        result = model.predict(crop, conf=min_conf, imgsz=TILE_IMGSZ, verbose=False)[0]
         for det in _parse_result(result, class_map, min_conf):
             if det["info"].role != "item" or det["info"].positive:
                 continue   # filtre 3: yalnız negatif (ihlal) sınıflar
@@ -849,7 +887,9 @@ def process_photo(model, frame, thresholds=None, default_conf=None, tiled=True):
       violations : ["kisi#1 eksik: gozluk", ...] — modelin izin verdiği
                    modda anlık ihlal özeti (yoksa boş liste)
     """
-    thresholds = dict(DEFAULT_THRESHOLDS) if thresholds is None else dict(thresholds)
+    # Fotoğraf hattı kendi (TTA+dilim üzerinde kalibre) eşiklerini kullanır —
+    # gerekçe PHOTO_THRESHOLDS tanımının üstünde.
+    thresholds = dict(PHOTO_THRESHOLDS) if thresholds is None else dict(thresholds)
     default_conf = default_conf if default_conf is not None else DEFAULT_CONF
 
     class_map = resolve_model_classes(model.names)
@@ -947,6 +987,128 @@ def process_photo(model, frame, thresholds=None, default_conf=None, tiled=True):
         _draw_box_with_label(canvas, det["box"], color, thickness, label)
 
     return canvas, counts, violations
+
+
+# ─────────────────── GERÇEK HATTIN TEST SETİ ÖLÇÜMÜ ───────────────────
+def evaluate_pipeline(model, img_dir, lbl_dir, tiled=True, progress_cb=None):
+    """Fotoğraf hattını (TTA + dilimli tespit) etiketli bir set üzerinde ölçer.
+
+    NEDEN VAR: model.val() modelin HAM halini ölçer; üretimde ise fotoğraf
+    TTA + dilimli tespit + tekilleştirme katmanlarından geçiyor. Kullanıcıya
+    gösterilen metrik, kullanıcının gerçekten çalıştırdığı hattın metriği
+    olmalı (plaka modülündeki tercihle aynı ilke). Eşik/boyut filtreleri
+    burada KAPALI tutulur: AP matematiği tüm güven aralığına bakar, eşik
+    uygulamak eğriyi keserdi.
+
+    Ölçüm matematiği Ultralytics'in kendisinden (ap_per_class + box_iou);
+    IoU eşleştirme algoritması val() ile birebir aynı.
+
+    progress_cb: her görüntüden sonra (islenen, toplam) ile çağrılır
+    (Streamlit ilerleme çubuğu için).
+
+    Döner: {"precision","recall","map50","map50_95","per_class":[...]}
+    — app.py'deki _metrics_from_val ile aynı şekil.
+    """
+    import numpy as np
+    import torch
+    from ultralytics.utils.metrics import ap_per_class, box_iou
+
+    img_dir, lbl_dir = Path(img_dir), Path(lbl_dir)
+    min_conf = 0.05          # AP eğrisi için düşük taban; eşikler uygulanmaz
+    iouv = np.linspace(0.5, 0.95, 10)
+
+    class_map = resolve_model_classes(model.names)
+    raw_to_idx = {v: k for k, v in model.names.items()}
+
+    img_paths = sorted(p for p in img_dir.glob("*")
+                       if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+    all_tp, all_conf, all_pred_cls, all_target_cls = [], [], [], []
+
+    for done, img_path in enumerate(img_paths, start=1):
+        frame = cv2.imread(str(img_path))
+        if frame is None:
+            continue
+        h, w = frame.shape[:2]
+
+        gt_boxes, gt_cls = [], []
+        lbl = lbl_dir / f"{img_path.stem}.txt"
+        if lbl.exists():
+            for line in lbl.read_text().splitlines():
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                cx, cy, bw, bh = (float(v) for v in parts[1:5])
+                cx, cy, bw, bh = cx * w, cy * h, bw * w, bh * h
+                gt_boxes.append([cx - bw / 2, cy - bh / 2,
+                                 cx + bw / 2, cy + bh / 2])
+                gt_cls.append(int(parts[0]))
+        all_target_cls.extend(gt_cls)
+
+        # Üretim fotoğraf hattı: tam kare + TTA, ardından dilimler
+        result = model.predict(frame, conf=min_conf, imgsz=640,
+                               augment=True, verbose=False)[0]
+        dets = _parse_result(result, class_map, min_conf)
+        if tiled and min(h, w) >= TILE_MIN_SIDE:
+            extra = _tile_detections(model, frame, class_map, min_conf)
+            dets = _merge_duplicates(dets, extra)
+
+        if progress_cb:
+            progress_cb(done, len(img_paths))
+        if not dets:
+            continue
+
+        pred_boxes = torch.tensor([list(d["box"]) for d in dets],
+                                  dtype=torch.float32)
+        pred_cls = np.array([raw_to_idx[d["info"].raw] for d in dets])
+        confs = np.array([d["conf"] for d in dets])
+
+        # val() ile aynı eşleştirme: IoU matrisi -> eşik başına, IoU'su en
+        # yüksek eşleşmeler önce; her tahmin ve her GT en fazla 1 kez.
+        tp = np.zeros((len(dets), len(iouv)), dtype=bool)
+        if gt_boxes:
+            iou = box_iou(torch.tensor(gt_boxes, dtype=torch.float32),
+                          pred_boxes).numpy()
+            iou = iou * (np.array(gt_cls)[:, None] == pred_cls[None, :])
+            for ti, thr in enumerate(iouv):
+                matches = np.array(np.nonzero(iou >= thr)).T
+                if matches.shape[0]:
+                    if matches.shape[0] > 1:
+                        order = iou[matches[:, 0], matches[:, 1]].argsort()[::-1]
+                        matches = matches[order]
+                        matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                        matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+                    tp[matches[:, 1].astype(int), ti] = True
+
+        all_tp.append(tp)
+        all_conf.extend(confs)
+        all_pred_cls.extend(pred_cls)
+
+    if not all_tp:
+        raise RuntimeError(f"{img_dir} altında ölçülecek görüntü bulunamadı.")
+
+    tp_arr = np.concatenate(all_tp, axis=0)
+    _, _, p, r, f1, ap, uniq, *_ = ap_per_class(
+        tp_arr, np.array(all_conf), np.array(all_pred_cls),
+        np.array(all_target_cls))
+
+    per_class = []
+    for i, cls_idx in enumerate(uniq):
+        pc_p, pc_r = float(p[i]), float(r[i])
+        per_class.append({
+            "Sınıf": model.names[int(cls_idx)],
+            "Precision": pc_p,
+            "Recall": pc_r,
+            "F1": (2 * pc_p * pc_r / (pc_p + pc_r)) if (pc_p + pc_r) > 0 else 0.0,
+            "mAP50": float(ap[i, 0]),
+            "mAP50-95": float(ap[i].mean()),
+        })
+    return {
+        "precision": float(p.mean()),
+        "recall": float(r.mean()),
+        "map50": float(ap[:, 0].mean()),
+        "map50_95": float(ap.mean()),
+        "per_class": per_class,
+    }
 
 
 # ─────────────────────────── KOMUT SATIRI TESTİ ───────────────────────────

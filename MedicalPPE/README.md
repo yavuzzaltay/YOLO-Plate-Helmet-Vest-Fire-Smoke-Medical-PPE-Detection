@@ -108,6 +108,11 @@ En zayıf sınıflar (F1'e göre): `no-surgical-gloves` (0.53), `no-surgical-cap
 2025 çalışmasının işaret ettiği gibi "yokluk" tespiti "varlık" tespitinden
 daha zor. Veri büyütmede önceliklendirilecek sınıflar bunlar (bkz. Yol haritası).
 
+**2026-07-22 eki:** bu set artık yalnızca **video** hattının eşiği.
+Fotoğraf hattı (TTA + dilimli tespit) için gerçek hattın F1 eğrisinden
+kalibre edilmiş ayrı bir `PHOTO_THRESHOLDS` seti var — gerekçe ve değerler
+için "Çıkarım-zamanı iyileştirme turu (2026-07-22)" bölümüne bak.
+
 Yeniden kalibrasyon gerekirse (yeni eğitim, yeni veri):
 1. `python prepare_dataset.py` — best.pt'yi eğiten Kaggle akışıyla AYNI 3
    Roboflow projesini indirip `MedicalPPE/dataset/` altında birleştirir
@@ -196,6 +201,58 @@ kritik); gerekirse `process_photo(tiled=...)` gibi videoya da opsiyonel
 eklenebilir. Not: buradaki "düz" referansı eşik/uyum filtresiz saf tespit
 ölçümüdür; app'teki "Metrikleri Hesapla" (model.val) sayılarıyla birebir
 karşılaştırma yapılmamalı.
+
+### Çıkarım-zamanı iyileştirme turu (2026-07-22) — ölçülmüş 3 deney, 2 karar
+
+Aynı sabit 535 görüntülük test setinde, yeniden eğitim olmadan üç fikir
+denendi (tamamı `git 36c3b59` checkpoint'i sonrası):
+
+**1) Tam kare çözünürlüğünü yükseltmek (640→768→960): REDDEDİLDİ.**
+`model.val` taraması küçük sınıfları kaldırırken büyükleri düşürdü —
+tipik ölçek-uyuşmazlığı takası (eğitim 640'taydı):
+
+| | 640 | 768 | 960 |
+|---|---|---|---|
+| genel mAP50 | **0.8001** | 0.8024 | 0.7853 |
+| genel mAP50-95 | **0.4793** | 0.4743 | 0.4237 |
+| no-facial-gear | 0.617 | 0.653 | 0.688 |
+| face-shield | **0.943** | 0.917 | 0.895 |
+| person | **0.917** | 0.910 | 0.848 |
+
+Bu takas zaten dilimli tespitin cerrahi olarak (yalnız küçük negatiflere)
+çözdüğü iş; kaba yoldan tekrarlamanın anlamı yok. Tam kare 640'ta kaldı.
+
+**2) Dilim ızgarasını sıklaştırmak (2×2→3×3): REDDEDİLDİ.** Gerçek hat
+ölçümünde genel mAP50 0.790→0.786; no-surgical-cap +2.6 kazanırken
+no-facial-gear −4.8, no-medical-attire −2.0 kaybetti, süre 2 kat. Sebep:
+640px kaynakta 3×3 dilim 246px kalıyor, 2.6× büyütme interpolasyon
+bulanıklığına dönüşüyor.
+
+**3) Dilimleri 768'de koşmak (`TILE_IMGSZ`, tam kare 640'ta kalırken):
+KABUL.** Yakınlaştırma kazancı yalnızca küçük-nesne geçişine uygulanmış
+oluyor:
+
+| | 2×2 dilim 640 (eski) | 2×2 dilim 768 (yeni) |
+|---|---|---|
+| genel mAP50 | 0.7902 | **0.7920** |
+| genel mAP50-95 | 0.4708 | **0.4723** |
+| no-surgical-gloves mAP50 | 0.455 | **0.475 (+2.0)** |
+| no-facial-gear mAP50 | 0.684 | 0.687 |
+| pozitif sınıflar | — | ±0.000 (birebir) |
+| süre (535 görüntü) | 115 s | 137 s |
+
+**Fotoğraf hattına özel eşik seti (`PHOTO_THRESHOLDS`):** gerçek hattın
+(TTA + dilim) F1 eğrisi ölçülünce tepe noktalarının `model.val` tabanlı
+eşiklerden sistematik yüksek çıktığı görüldü (ortalama +0.15; TTA doğru
+tespitlerin güvenini yükseltiyor). `process_photo` artık bu seti kullanıyor;
+video hattında TTA/dilim olmadığı için `DEFAULT_THRESHOLDS` videoda geçerli
+kalıyor. Yan fayda: yüksek eşikler alakasız sahnede yanlış alarm riskini de
+düşürür (v2 denemesinde görülen türden).
+
+**Arayüz dürüstlüğü:** app.py'deki "Metrikleri Hesapla" düğmesi artık düz
+`model.val` değil, `MedicalPPEVideo.evaluate_pipeline` ile **gerçek fotoğraf
+hattını** (TTA + dilimli) ölçüyor — plaka modülündeki ilkeyle aynı. Ölçüm
+matematiği yine Ultralytics'in (`ap_per_class` + `box_iou`).
 
 ### Bilinen düzeltmeler (2026-07-17)
 
