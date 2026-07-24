@@ -1,11 +1,11 @@
-# VestAndPlateDetection — Teknik Rapor
+# VestAndBaret — Teknik Rapor
 
 Baret (`hardhat`) ve yelek (`safety-vest`) takılıp takılmadığını tespit
 eden modül. Diğer üç modülün aksine bu modülün **kendi Python dosyası
 yok** — mantığı doğrudan kök dizindeki `app.py` içinde yaşıyor
 (`run_vest_image`, `run_vest_video`, `log_vest_result`,
 `compute_vest_metrics`, `load_vest_model` fonksiyonları). Klasörde
-yalnızca eğitilmiş ağırlık (`best.pt`) ve olay kaydı (`ihlal_log.csv`)
+yalnızca eğitilmiş ağırlık (`VestAndBaret.pt`) ve olay kaydı (`ihlal_log.csv`)
 bulunuyor; ayrı bir eğitim scripti veya yerel veri seti yok — model
 muhtemelen başka bir ortamda eğitilip buraya bırakıldı.
 
@@ -15,7 +15,7 @@ muhtemelen başka bir ortamda eğitilip buraya bırakıldı.
   `no-safety-vest` — **pozitif+negatif çift şema** (MedicalPPE'nin
   "direct" modunun ilham aldığı düzenin aynısı, burada zaten önceden
   mevcuttu).
-- `load_vest_model()` doğrudan `VestAndPlateDetection/best.pt`'yi yükler
+- `load_vest_model()` doğrudan `VestAndBaret/VestAndBaret.pt`'yi yükler
   (bulma mantığı yok — tek dosya, sabit yol).
 - Mimari/eğitim parametreleri (epoch, batch, veri kaynağı) bu depoda
   belgelenmiyor; yalnızca eğitim-sonu checkpoint mevcut.
@@ -66,7 +66,7 @@ zaman-tabanlı örnekleme diğer modüllerle aynı desenle uygulanıyor
 
 `compute_vest_metrics()` diğer üç modülden farklı çalışır: yerelde
 bağımsız bir test seti **olmadığı için** `model.val()` çalıştırılamıyor.
-Bunun yerine `best.pt`'nin PyTorch checkpoint'i doğrudan yüklenip
+Bunun yerine `VestAndBaret.pt`'nin PyTorch checkpoint'i doğrudan yüklenip
 (`torch.load(..., weights_only=False)`) Ultralytics'in eğitim sonunda
 otomatik gömdüğü `train_metrics` sözlüğü okunuyor:
 
@@ -88,7 +88,7 @@ değil**, eğitimin kendi train/val ayrımından geliyor.
 
 ## 6. Diğer modüllerle farkı — özet
 
-| Özellik | VestAndPlateDetection | FireAndSmoke / MedicalPPE |
+| Özellik | VestAndBaret | FireAndSmoke / MedicalPPE |
 |---|---|---|
 | Kimlik takibi (ByteTrack) | ❌ Yok | ✅ Var |
 | Zamansal onay (N-of-M) | ❌ Yok | ✅ Var |
@@ -114,6 +114,6 @@ değil**, eğitimin kendi train/val ayrımından geliyor.
 
 | Dosya | Görev |
 |---|---|
-| `best.pt` | Eğitilmiş model + `train_metrics` gömülü checkpoint. |
+| `VestAndBaret.pt` | Eğitilmiş model + `train_metrics` gömülü checkpoint. |
 | `ihlal_log.csv` | Manuel/otomatik loglanan ihlal kayıtları. |
 | *(mantık)* `app.py` içinde | `run_vest_image`, `run_vest_video`, `log_vest_result`, `load_vest_model`, `compute_vest_metrics`. |

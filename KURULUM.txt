@@ -28,7 +28,7 @@ yol ayraçları) farklıdır.
 ----------------------------------------------------------------------
 
 Proje TEK bir sanal ortam kullanıyor: PlateDetection/.venv altında.
-Diğer üç modül de (VestAndPlateDetection, FireAndSmoke, MedicalPPE) bu
+Diğer üç modül de (VestAndBaret, FireAndSmoke, MedicalPPE) bu
 ortamı paylaşır — app.py hepsini aynı Python sürecinde çalıştırır.
 
 PowerShell'de proje kök klasöründeyken:
@@ -75,30 +75,35 @@ Git deposu BÜYÜK model dosyalarının çoğunu (.gitignore ile "**/*.pt")
 hariç tutuyor; bazıları istisnai olarak elle depoya eklenmiş. Şu an
 depoda GERÇEKTEN bulunanlar ile EKSİK olanlar:
 
-  MedicalPPE/best.pt                                  → depoda VAR (v1 model)
-  FireAndSmoke/runs/detect/fire_smoke_yolo11-4/...     → depoda VAR (eski nano deneme)
-  FireAndSmoke/runs/detect/fire_smoke_yolo11s/...      → depoda VAR (eski, D-Fire'sız deneme)
-  FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/...→ DEPODA YOK — ama kod bunu
-                                                          otomatik en iyi model sanıp
-                                                          seçmeye çalışacak konumda!
-  VestAndPlateDetection/best.pt                        → DEPODA YOK — bu modül
-                                                          BAŞKA hiçbir dosyaya
-                                                          bakmıyor, doğrudan bu
-                                                          yola bakıyor.
+  MedicalPPE/MedicalPPE.pt                                       → depoda VAR (v1 model)
+  FireAndSmoke/runs/detect/fire_smoke_yolo11-4/.../fire_smoke_yolo11-4.pt   → depoda VAR (eski nano deneme)
+  FireAndSmoke/runs/detect/fire_smoke_yolo11s/.../fire_smoke_yolo11s.pt    → depoda VAR (eski, D-Fire'sız deneme)
+  FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/.../fire_smoke_yolo11s_dfire.pt
+                                                          → DEPODA YOK — ama kod bunu
+                                                            otomatik en iyi model sanıp
+                                                            seçmeye çalışacak konumda!
+  VestAndBaret/VestAndBaret.pt                           → DEPODA YOK — bu modül
+                                                            BAŞKA hiçbir dosyaya
+                                                            bakmıyor, doğrudan bu
+                                                            yola bakıyor.
+
+(Not: her modülün model dosyası artık kendi klasörünün/deneyinin adını
+ taşıyor — genel geçer "best.pt" adı YOK; find_weights()/
+ find_latest_best_weights()/initialize_model() bu isimlere göre arar.)
 
 SONUÇ: sadece "git clone" ile başka bir bilgisayara taşırsan:
-  - 🦺 Baret & Yelek sekmesi FileNotFoundError ile PATLAR (best.pt yok).
+  - 🦺 Baret & Yelek sekmesi FileNotFoundError ile PATLAR (VestAndBaret.pt yok).
   - 🔥 Yangın & Duman sekmesi ÇALIŞIR ama en iyi (D-Fire ile eğitilmiş)
     modeli DEĞİL, eski/daha zayıf bir modeli SESSİZCE kullanır (kod
-    "en son bulduğum best.pt" mantığıyla mevcut olanlardan birini seçer,
-    hata vermez — bu yüzden fark etmesi zor).
+    "en son değiştirilen ağırlık dosyası" mantığıyla mevcut olanlardan
+    birini seçer, hata vermez — bu yüzden fark etmesi zor).
 
 BUNU ÇÖZMEK İÇİN: bu iki dosyayı KAYNAK BİLGİSAYARDAN elle kopyala:
-    FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/weights/best.pt
-    VestAndPlateDetection/best.pt
+    FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/weights/fire_smoke_yolo11s_dfire.pt
+    VestAndBaret/VestAndBaret.pt
 Aynı göreli yola (yukarıdaki gibi) yapıştır. İkisi de birkaç on MB.
 
-(Not: MedicalPPE modülünde bu sorun yok, MedicalPPE/best.pt zaten
+(Not: MedicalPPE modülünde bu sorun yok, MedicalPPE/MedicalPPE.pt zaten
  depoda; ayrıca yedek MedicalPPE/best_v1_640px_2026-07-16.pt de VAR.)
 
 ----------------------------------------------------------------------
@@ -174,5 +179,5 @@ Dosya haritası (kurulumla ilgili)
                          okumak için)
   MedicalPPE/TEKNIK_RAPOR.md
   FireAndSmoke/TEKNIK_RAPOR.md
-  VestAndPlateDetection/TEKNIK_RAPOR.md
+  VestAndBaret/TEKNIK_RAPOR.md
                        → her modülün kendi teknik detayları

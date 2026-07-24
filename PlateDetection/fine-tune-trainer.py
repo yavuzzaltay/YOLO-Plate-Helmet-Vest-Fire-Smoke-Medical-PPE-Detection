@@ -55,7 +55,7 @@ if __name__ == "__main__":
     ROBOFLOW_API_KEY = "5ev3CyoR15ytn0okpkFV"
     
     # 2. Üzerine eğiteceğin mevcut modelinin yolu
-    MY_BEST_MODEL_PATH = r"C:\Users\Yavuz Altay\Desktop\İyex\PlateDetection\best.pt"
+    MY_BEST_MODEL_PATH = r"C:\Users\Yavuz Altay\Desktop\İyex\PlateDetection\PlateDetection.pt"
     
     try:
         # --- VERİ SETİ İNDİRME AŞAMASI ---

@@ -2,7 +2,7 @@
 """
 İyex Tespit Demo — Streamlit arayüzü
 =====================================
-Bu dosya PlateDetection/ (plaka okuma) ve VestAndPlateDetection/ (baret &
+Bu dosya PlateDetection/ (plaka okuma) ve VestAndBaret/ (baret &
 yelek tespiti) klasörlerindeki hazır modelleri/pipeline'ları web üzerinden
 denemek için bir arayüz sağlar. Asıl tespit/OCR mantığına DOKUNULMAZ; bu
 dosya sadece PlateDetection/colab_local.py ve PlateDetection/video_plaka.py
@@ -29,12 +29,12 @@ BASE_DIR = Path(__file__).resolve().parent
 # Türkçe karakterli dizinlerde Windows/PyTorch/Streamlit uyumluluğu için göreceli yollar kullanıyoruz:
 try:
     PLATE_DIR = Path(os.path.relpath(BASE_DIR / "PlateDetection", os.getcwd()))
-    VEST_DIR = Path(os.path.relpath(BASE_DIR / "VestAndPlateDetection", os.getcwd()))
+    VEST_DIR = Path(os.path.relpath(BASE_DIR / "VestAndBaret", os.getcwd()))
     FIRE_DIR = Path(os.path.relpath(BASE_DIR / "FireAndSmoke", os.getcwd()))
     MED_DIR = Path(os.path.relpath(BASE_DIR / "MedicalPPE", os.getcwd()))
 except Exception:
     PLATE_DIR = Path("PlateDetection")
-    VEST_DIR = Path("VestAndPlateDetection")
+    VEST_DIR = Path("VestAndBaret")
     FIRE_DIR = Path("FireAndSmoke")
     MED_DIR = Path("MedicalPPE")
 
@@ -244,10 +244,10 @@ def compute_plate_metrics() -> dict:
         raise FileNotFoundError(f"{img_dir} bulunamadı.")
 
     cwd = os.getcwd()
-    os.chdir(PLATE_DIR)  # colab_local'ın best.pt/relatif yol varsayımlarıyla tutarlı olsun
+    os.chdir(PLATE_DIR)  # colab_local'ın PlateDetection.pt/relatif yol varsayımlarıyla tutarlı olsun
     try:
         import colab_local
-        model = YOLO("best.pt")
+        model = YOLO("PlateDetection.pt")
         device = "0" if torch.cuda.is_available() else "cpu"
 
         iouv = np.linspace(0.5, 0.95, 10)  # Ultralytics'in standart 10 IoU eşiği (mAP50-95 için)
@@ -338,16 +338,16 @@ def compute_plate_metrics() -> dict:
 
 
 def compute_vest_metrics() -> dict:
-    """VestAndPlateDetection için yerelde test seti yok; checkpoint'e gömülü
+    """VestAndBaret için yerelde test seti yok; checkpoint'e gömülü
     (eğitim sırasındaki son doğrulama) değerleri okur — model.val() koşmaz."""
     import torch
-    weights = VEST_DIR / "best.pt"
+    weights = VEST_DIR / "VestAndBaret.pt"
     if not weights.exists():
         raise FileNotFoundError(f"{weights} bulunamadı.")
     ckpt = torch.load(str(weights), map_location="cpu", weights_only=False)
     tm = ckpt.get("train_metrics") or {}
     if not tm:
-        raise ValueError("best.pt içinde train_metrics bulunamadı.")
+        raise ValueError("VestAndBaret.pt içinde train_metrics bulunamadı.")
     return {
         "precision": float(tm["metrics/precision(B)"]),
         "recall": float(tm["metrics/recall(B)"]),
@@ -455,7 +455,7 @@ def render_model_metrics(model_key):
 @st.cache_resource(show_spinner="Plaka modeli ve OCR motoru yükleniyor (ilk seferde biraz sürer)...")
 def load_plate_pipeline():
     cwd = os.getcwd()
-    os.chdir(PLATE_DIR)  # colab_local.initialize_model() "best.pt" dosyasını cwd'de arıyor
+    os.chdir(PLATE_DIR)  # colab_local.initialize_model() "PlateDetection.pt" dosyasını cwd'de arıyor
     try:
         import colab_local
         model = colab_local.initialize_model()
@@ -468,7 +468,7 @@ def load_plate_pipeline():
 @st.cache_resource(show_spinner="Baret/yelek modeli yükleniyor...")
 def load_vest_model():
     from ultralytics import YOLO
-    return YOLO(str(VEST_DIR / "best.pt"))
+    return YOLO(str(VEST_DIR / "VestAndBaret.pt"))
 
 
 @st.cache_resource(show_spinner="Yangın/duman modeli yükleniyor...")
@@ -999,7 +999,7 @@ with tab_plate:
                 if st.button(f"Tüm örnek görselleri işle ({len(samples)} adet)", key="plate_batch_run"):
                     colab_local, model, reader, gpu = load_plate_pipeline()
                     if model is None:
-                        st.error("Model yüklenemedi (best.pt bulunamadı).")
+                        st.error("Model yüklenemedi (PlateDetection.pt bulunamadı).")
                     else:
                         with st.spinner(f"{len(samples)} görsel işleniyor, biraz sürebilir..."):
                             all_results = colab_local.process_all_images(str(arabalar_dir), model, reader, save_debug=True)
@@ -1019,7 +1019,7 @@ with tab_plate:
             if image_path and st.button("Plakayı Oku", key="plate_img_run"):
                 colab_local, model, reader, gpu = load_plate_pipeline()
                 if model is None:
-                    st.error("Model yüklenemedi (best.pt bulunamadı).")
+                    st.error("Model yüklenemedi (PlateDetection.pt bulunamadı).")
                 else:
                     with st.spinner("İşleniyor (tespit → temizleme → OCR)..."):
                         results, debug_dir = run_plate_image(colab_local, model, reader, image_path)
@@ -1125,7 +1125,7 @@ with tab_plate:
             if baglanti_ok:
                 colab_local, model, reader, gpu = load_plate_pipeline()
                 if model is None:
-                    st.error("Model yüklenemedi (best.pt bulunamadı).")
+                    st.error("Model yüklenemedi (PlateDetection.pt bulunamadı).")
                 else:
                     frame_ph = st.empty()
                     status_ph = st.empty()
@@ -1152,7 +1152,7 @@ with tab_plate:
 with tab_vest:
     render_model_metrics("vest")
     st.info(
-        "VestAndPlateDetection klasöründe yalnızca eğitilmiş model dosyası (best.pt) var, "
+        "VestAndBaret klasöründe yalnızca eğitilmiş model dosyası (VestAndBaret.pt) var, "
         "örnek görsel/video bulunmuyor — kendi dosyanızı yükleyerek deneyebilirsiniz. "
         "Model sınıfları: hardhat, no-hardhat, safety-vest, no-safety-vest, person."
     )
@@ -1433,11 +1433,11 @@ with tab_med:
     med_weights = medical_weights_or_none()
 
     if med_weights is None:
-        # Model henüz eğitimde: sekme hazır ama pasif. best.pt,
+        # Model henüz eğitimde: sekme hazır ama pasif. MedicalPPE.pt,
         # MedicalPPE/ klasörüne kopyalandığı anda (herhangi bir etkileşimle
         # gelen ilk rerun'da) aşağıdaki arayüz kendiliğinden açılır.
         st.warning(
-            "Tıbbi PPE modeli henüz eğitimde. Eğitim bitince **best.pt** dosyasını "
+            "Tıbbi PPE modeli henüz eğitimde. Eğitim bitince **MedicalPPE.pt** dosyasını "
             "`MedicalPPE/` klasörüne kopyala — bu sekme kendiliğinden aktifleşecek. "
             "Sonrasında `MedicalPPE/evaluate.py` ile sınıf bazlı eşikleri kalibre "
             "etmeyi unutma (detay: MedicalPPE/README.md)."

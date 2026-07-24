@@ -10,7 +10,7 @@ uygulamasında (app.py) birleşen DÖRT bağımsız görüntü işleme modülün
 oluşuyor:
 
   1) PlateDetection            -> Plaka tespiti + OCR okuma
-  2) VestAndPlateDetection      -> Baret & yelek (iş güvenliği) tespiti
+  2) VestAndBaret               -> Baret & yelek (iş güvenliği) tespiti
   3) FireAndSmoke               -> Yangın & duman tespiti/izleme
   4) MedicalPPE                 -> Tıbbi koruyucu ekipman (KKD) uyum izleme
 
@@ -159,14 +159,17 @@ kaydediliyor ve tabloda gösteriliyor.
 
 
 ======================================================================
-3. MODÜL: VestAndPlateDetection — Baret & Yelek Tespiti
+3. MODÜL: VestAndBaret — Baret & Yelek Tespiti
 ======================================================================
+(Not: bu modül eskiden VestAndPlateDetection olarak adlandırılmıştı;
+2026-07-24'te VestAndBaret'e taşındı, model dosyası da genel-geçer
+"best.pt" yerine "VestAndBaret.pt" olarak yeniden adlandırıldı.)
 
 AMAÇ: İş güvenliği ortamında baret (hardhat) ve yelek (safety-vest)
 takılıp takılmadığını tespit etmek.
 
-DURUM: Bu modül en sade olanı — klasörde sadece eğitilmiş best.pt ve
-bir ihlal_log.csv var; örnek görsel/video, ayrı bir eğitim scripti ya
+DURUM: Bu modül en sade olanı — klasörde sadece eğitilmiş VestAndBaret.pt
+ve bir ihlal_log.csv var; örnek görsel/video, ayrı bir eğitim scripti ya
 da yerel veri seti yok (muhtemelen başka bir ortamda eğitilmiş).
 
 SINIFLAR: hardhat, no-hardhat, safety-vest, no-safety-vest, person
@@ -174,7 +177,7 @@ SINIFLAR: hardhat, no-hardhat, safety-vest, no-safety-vest, person
 düzenin aynısı burada da zaten mevcuttu).
 
 METRİKLER: yerelde bağımsız bir test seti OLMADIĞI için gerçek bir
-ölçüm yapılamıyor; bunun yerine best.pt dosyasının PyTorch checkpoint'i
+ölçüm yapılamıyor; bunun yerine VestAndBaret.pt dosyasının PyTorch checkpoint'i
 içine Ultralytics'in eğitim sonunda otomatik gömdüğü son doğrulama
 sonuçları okunuyor (arayüzde bu açıkça "eğitim sırasındaki son
 doğrulama, yerelde ayrı test seti yok" diye belirtiliyor):
@@ -569,5 +572,5 @@ MedicalPPE'DE BEKLEYEN İŞ:
   - C:\ppe_raw altındaki ham (birleştirilmemiş) Roboflow verisi hâlâ
     diskte duruyor; işi bitince silinebilir.
 
-DİĞER MODÜLLER: PlateDetection, VestAndPlateDetection ve FireAndSmoke
+DİĞER MODÜLLER: PlateDetection, VestAndBaret ve FireAndSmoke
 stabil durumda, aktif bir eğitim/değişiklik beklemiyorlar.

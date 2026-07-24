@@ -56,11 +56,17 @@ BASE_DIR = Path(__file__).resolve().parent
 
 def find_latest_best_weights():
     # Sadece FireAndSmoke/runs/detect altindaki egitimlere bakar (baska
-    # projelerdeki best.pt dosyalarina karismaz), en son degistirilen
-    # (en guncel egitimden kalan) best.pt dosyasini otomatik secer.
+    # projelerdeki agirlik dosyalarina karismaz). Her deneme klasorundeki
+    # "best" agirligi kendi deney adiyla yeniden adlandirildi (ornek:
+    # fire_smoke_yolo11s_dfire.pt) — "best.pt" gibi jenerik bir isim
+    # istenmedigi icin. "last.pt" (her epoch sonu kaydedilen, henuz en
+    # iyi olmayan agirlik) HARIC tutulur; kalanlardan en son degistirilen
+    # (en guncel egitimden kalan) otomatik secilir. Bu desen, ileride
+    # yeniden adlandirilmamis TAZE bir Ultralytics ciktisini (hala
+    # "best.pt" adinda) da sorunsuz yakalar.
     runs_dir = BASE_DIR / "runs" / "detect"
 
-    candidates = list(runs_dir.glob("*/weights/best.pt"))
+    candidates = [p for p in runs_dir.glob("*/weights/*.pt") if p.name != "last.pt"]
     if not candidates:
         raise FileNotFoundError(
             f"{runs_dir} altinda hicbir 'best.pt' bulunamadi. Once train.py ile "

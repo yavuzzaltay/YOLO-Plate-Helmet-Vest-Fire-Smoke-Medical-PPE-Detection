@@ -56,7 +56,7 @@ Bu modül arayüz İÇERMEZ: Streamlit (app.py) veya komut satırı (main())
 buradaki MedicalPPEMonitor sınıfını kullanır.
 
 NOT — MODEL HENÜZ YOK: eğitim sürüyor. best.pt hazır olunca ya
-MedicalPPE/best.pt olarak buraya kopyala ya da eğitimi
+MedicalPPE/MedicalPPE.pt olarak buraya kopyala ya da eğitimi
 MedicalPPE/runs/detect altında bitir; find_weights() ikisini de bulur.
 """
 
@@ -75,10 +75,11 @@ def find_weights():
     """Tıbbi PPE model ağırlığını bulur.
 
     Öncelik sırası:
-      1) MedicalPPE/best.pt            (elle bırakılan hazır model)
-      2) MedicalPPE/runs/detect/*/weights/best.pt  (en son eğitim)
+      1) MedicalPPE/MedicalPPE.pt      (elle bırakılan hazır model)
+      2) MedicalPPE/runs/detect/*/weights/best.pt  (en son eğitim, henüz
+         adlandırılmamış ham Ultralytics çıktısı)
     """
-    direct = BASE_DIR / "best.pt"
+    direct = BASE_DIR / "MedicalPPE.pt"
     if direct.exists():
         return str(direct)
 
@@ -88,7 +89,7 @@ def find_weights():
 
     raise FileNotFoundError(
         f"{BASE_DIR} altında model bulunamadı. Eğitim bittiğinde best.pt "
-        f"dosyasını '{BASE_DIR / 'best.pt'}' olarak kopyala (veya eğitimi "
+        f"dosyasını '{BASE_DIR / 'MedicalPPE.pt'}' olarak kopyala (veya eğitimi "
         f"'{BASE_DIR / 'runs' / 'detect'}' altında çalıştır)."
     )
 

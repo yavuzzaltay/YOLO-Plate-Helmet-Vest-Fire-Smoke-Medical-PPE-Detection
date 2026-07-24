@@ -8,11 +8,12 @@ tarihçe için kök dizindeki `PROJE_RAPORU.txt` (4. bölüm) ve
 ## 1. Model
 
 - Mimari: **YOLO11s** (Ultralytics), 2 sınıf (`fire`, `smoke`).
-- Aktif ağırlık: `runs/detect/fire_smoke_yolo11s_dfire/weights/best.pt`
-  (`find_latest_best_weights()` bu klasördeki en son değiştirilen
-  `best.pt`'yi otomatik seçer — birden fazla eğitim denemesi
+- Aktif ağırlık: `runs/detect/fire_smoke_yolo11s_dfire/weights/fire_smoke_yolo11s_dfire.pt`
+  (`find_latest_best_weights()` bu klasördeki en son değiştirilen ağırlık
+  dosyasını otomatik seçer, `last.pt` hariç — birden fazla eğitim denemesi
   (`fire_smoke_yolo11-4` nano taban çizgisi, `fire_smoke_yolo11s`
-  D-Fire'sız ilk small deneme) diskte tutulur, kod her zaman en
+  D-Fire'sız ilk small deneme) diskte tutulur, her biri kendi deney
+  adıyla adlandırılmış "best" ağırlığını taşır; kod her zaman en
   yeniyi kullanır).
 - **nano → small geçişi**: ilk deneme (yolo11n, 50 epoch) recall'ü
   0.52'de kaldı — nano'nun ~2.6M parametresi, duman gibi şekilsiz/yarı
@@ -144,6 +145,6 @@ isabetli; video gibi sürekli bir akış olmadığı için bu maliyetin
 | `prepare_dataset.py` | İki Roboflow veri setini `merged_dataset/`de birleştirir, sınıf id'lerini normalize eder. |
 | `train.py` | `merged_dataset/` üzerinde YOLO11s eğitimi (yerel). |
 | `train_kaggle.py` | Kaggle'da D-Fire dahil genişletilmiş eğitim. |
-| `evaluate.py` | En son `best.pt`'yi test setinde ölçer, eşik önerisi üretir. |
-| `runs/detect/*/weights/best.pt` | Eğitim denemeleri (aktif: `fire_smoke_yolo11s_dfire`). |
+| `evaluate.py` | En son ağırlığı test setinde ölçer, eşik önerisi üretir. |
+| `runs/detect/*/weights/*.pt` | Eğitim denemeleri, her biri kendi deney adıyla (aktif: `fire_smoke_yolo11s_dfire.pt`). |
 | `YanginKayitlari/`, `yangin_olay_log.csv` | Video hattının kanıt fotoğrafları ve olay kaydı. |

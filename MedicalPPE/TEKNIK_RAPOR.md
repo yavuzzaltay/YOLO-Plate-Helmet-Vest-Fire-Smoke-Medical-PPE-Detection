@@ -10,10 +10,12 @@ dizindeki `PROJE_RAPORU.txt` içindeki 5. bölüme bakılabilir.
 ## 1. Model
 
 - Mimari: **YOLO11s** (Ultralytics), 14 sınıf, tek aşamalı nesne tespiti.
-- Ağırlık dosyası: `best.pt` (640×640 girişle eğitildi). Yedek kopya
+- Ağırlık dosyası: `MedicalPPE.pt` (640×640 girişle eğitildi; "best.pt"
+  gibi genel-geçer bir ad yerine modül adını taşıyor). Yedek kopya
   `best_v1_640px_2026-07-16.pt`.
-- `find_weights()` önce kök dizindeki `best.pt`'yi arar, yoksa
-  `runs/detect/*/weights/best.pt` altındaki en yeni eğitime düşer.
+- `find_weights()` önce kök dizindeki `MedicalPPE.pt`'yi arar, yoksa
+  `runs/detect/*/weights/best.pt` altındaki (henüz adlandırılmamış, ham
+  Ultralytics çıktısı) en yeni eğitime düşer.
 - 14 sınıf, **pozitif+negatif çift şema**: her ekipman için hem "takılı"
   hem "takılı değil/yanlış takılı" sınıfı var (`surgical-gloves` /
   `no-surgical-gloves` gibi). Bu şema, modelin "eksiklik"i doğrudan
@@ -227,5 +229,5 @@ sahne sağlamlık testi zorunlu adımlar oldu. Tam kıyas tablosu
 | `train.py` | Sonraki eğitim şablonu (yolo11s, AdamW, 768px, batch 12). |
 | `evaluate.py` | Video eşikleri için F1-zirve önerisi + test seti metrikleri. |
 | `evaluate_kaggle.ipynb` | `evaluate.py`'nin Kaggle'da tek başına çalışan hali. |
-| `best.pt` / `best_v1_640px_2026-07-16.pt` | Aktif model + yedek. |
+| `MedicalPPE.pt` / `best_v1_640px_2026-07-16.pt` | Aktif model + yedek. |
 | `IhlalKayitlari/`, `medikal_ihlal_log.csv` | Video hattının kanıt fotoğrafları ve olay kaydı. |

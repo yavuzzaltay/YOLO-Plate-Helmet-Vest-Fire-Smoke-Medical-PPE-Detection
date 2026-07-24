@@ -37,14 +37,15 @@ import torch
 
 def initialize_model():
     """
-    YOLO modelini yükler. Önce mevcut dizinde 'best.pt' arar,
-    bulamazsa runs/ altındaki en son eğitim çıktısını kullanır.
-    
+    YOLO modelini yükler. Önce mevcut dizinde 'PlateDetection.pt' arar,
+    bulamazsa runs/ altındaki en son eğitim çıktısını (ham, henüz
+    adlandırılmamış "best.pt") kullanır.
+
     Returns:
         model: YOLO model nesnesi veya None (bulunamazsa)
     """
-    if os.path.exists("best.pt"):
-        best_weight = "best.pt"
+    if os.path.exists("PlateDetection.pt"):
+        best_weight = "PlateDetection.pt"
     else:
         # Eğitim çıktılarını tara — en son tarihli olanı al
         weight_files = glob.glob("runs/detect/train*/weights/best.pt")
@@ -54,7 +55,7 @@ def initialize_model():
         print(f"[MODEL] Ağırlık dosyası yüklendi: {best_weight}")
         return YOLO(best_weight)
     else:
-        print("[HATA] 'best.pt' bulunamadı. Eğitim tamamlanmamış olabilir.")
+        print("[HATA] 'PlateDetection.pt' bulunamadı. Eğitim tamamlanmamış olabilir.")
         return None
 
 
