@@ -24,8 +24,12 @@ train_*_log.txt
 **/*.avi
 **/*.mov
 **/*.mkv
+**/*.m4a
+**/*.mp3
+**/*.wav
 
 # Temp and Run outputs
+runs/
 PlateDetection/runs/
 PlateDetection/arabalar/sonuclar/
 PlateDetection/cikti_video/
