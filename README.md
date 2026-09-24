@@ -37,6 +37,12 @@ The production pipeline scans each frame at 3 scales, merges boxes, corrects ske
 
 On video these detections alone never raise an alarm — events are confirmed through YOLO tracking + N-of-M temporal voting (fire 4/8, smoke 5/10) and recorded with evidence snapshots.
 
+More live outputs from the same model:
+
+| Indoor fire (`fire` 0.41 + 0.61) | Wildfire (`smoke` 0.84 + `fire` 0.42/0.44) |
+|---|---|
+| ![Indoor fire detection](docs/screenshots/det-fire-room.jpg) | ![Wildfire detection](docs/screenshots/det-fire-wild.jpg) |
+
 ### Medical PPE
 
 | Interface (sample gallery) | Model output (`person`, `surgical-cap`, `mask`, `gown` — no violation) |
