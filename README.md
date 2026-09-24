@@ -9,7 +9,43 @@ Staj kapsamında geliştirilmiş, **4 bağımsız YOLO tabanlı görüntü işle
 
 Her modül fotoğraf, video ve canlı telefon kamerası (IP Webcam) ile çalışır; tespitler CSV'ye yazılır, kanıt fotoğraflarıyla arşivlenir. Arayüzdeki **"Metrikleri Hesapla"** butonu her modelin doğruluk metriklerini test setinde canlı ölçer — sabit, ezber değer yok.
 
-![Arayüz önizlemesi](docs/screenshots/01-dashboard.svg)
+![Ana ekran — plaka sekmesi](docs/screenshots/app-plate.png)
+
+## Çalışırken — gerçek ekran görüntüleri
+
+Aşağıdaki görüntülerin tamamı sistem çalışırken alındı: önce uygulamanın gerçek arayüzü, ardından her modelin gerçek bir örnek üzerindeki anotasyonlu çıktısı.
+
+### Plaka tespiti + OCR
+
+| Arayüz (örnek galeri) | Model çıktısı (`araba1.jpg` → **34 N 5953**, %96,2) |
+|---|---|
+| ![Plaka arayüzü](docs/screenshots/app-plate.png) | ![Plaka tespiti](docs/screenshots/det-plate.jpg) |
+
+Üretim hattı tek karede 3 ölçekte tarama yapar, kutuları tekilleştirir, eğikliği düzeltir, mavi bant/turuncu sticker temizler ve 5 görüntü varyantında OCR oylaması yapar (tam log çıktısı yukarıdaki gibi konsolda görülür).
+
+### Baret & Yelek
+
+| Arayüz (ihlal kayıtlarıyla) | Model çıktısı (kişi + `no-safety-vest` tespiti) |
+|---|---|
+| ![Baret-yelek arayüzü](docs/screenshots/app-vest.png) | ![Baret-yelek tespiti](docs/screenshots/det-vest.jpg) |
+
+### Yangın & Duman
+
+| Arayüz (sınıf bazlı eşiklerle) | Model çıktısı (`fire` 0,72 + `smoke` 0,41) |
+|---|---|
+| ![Yangın arayüzü](docs/screenshots/app-fire.png) | ![Yangın tespiti](docs/screenshots/det-fire.jpg) |
+
+Video tarafında bu tespitler tek başına alarm üretmez — YOLO track + N-of-M zamansal onaydan (fire 4/8, smoke 5/10) geçen olaylar kanıt fotoğrafıyla kaydedilir:
+
+| Yangın — onaylı olay kanıtı | Duman — onaylı olay kanıtı |
+|---|---|
+| ![Yangın kanıt karesi](docs/screenshots/evidence-fire.jpg) | ![Duman kanıt karesi](docs/screenshots/evidence-smoke.jpg) |
+
+### Tıbbi PPE
+
+| Arayüz (örnek galeri) | Model çıktısı (`kişi`, `bone`, `maske`, `önlük` — ihlal yok) |
+|---|---|
+| ![Tıbbi PPE arayüzü](docs/screenshots/app-medical.png) | ![Tıbbi PPE denetimi](docs/screenshots/det-medical.jpg) |
 
 ## Neden iyi bir proje?
 
@@ -27,15 +63,9 @@ Her modül fotoğraf, video ve canlı telefon kamerası (IP Webcam) ile çalış
 | Yangın & Duman | `FireAndSmoke/` | Track + N-of-M zamansal onay (fire 4/8, smoke 5/10), kanıt fotoğrafı + CSV | P %72,8 · R %53,0 · **mAP50 %61,1** (351 görüntü) |
 | Tıbbi PPE | `MedicalPPE/` | 14 sınıf KKD denetimi, TTA + 2×2 dilimli tespit, kişi-ekipman eşleştirme | P %76,3 · R %80,3 · **mAP50 %80,0** (535 görüntü) |
 
-![Mimari](docs/screenshots/02-architecture.svg)
+## Mimari — 4 bağımsız modül, tek arayüz
 
-### Canlı sistem çıktıları (gerçek kayıtlar)
-
-Yangın/duman izleme çalışırken sistemin otomatik kaydettiği kanıt kareleri:
-
-| Yangın — onaylı olay kanıtı | Duman — onaylı olay kanıtı |
-|---|---|
-| ![Yangın kanıt karesi](docs/screenshots/evidence-fire.jpg) | ![Duman kanıt karesi](docs/screenshots/evidence-smoke.jpg) |
+Hiçbir modül diğerini import etmez; her biri komut satırından tek başına da çalışır. Video/canlı izlemede ortak katmanlar: YOLO track (kalıcı iz kimliği) → sınıf bazlı güven eşiği (F1 zirvesinden kalibre) → N-of-M zamansal filtre → onay anında kanıt kaydı (fotoğraf + CSV, alarm yok). Fotoğraf modunda TTA her zaman açıktır.
 
 ## Hızlı başlangıç
 
