@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-İyex Tespit Demo — Streamlit arayüzü
-=====================================
+YOLO Çoklu Tespit Platformu — Streamlit arayüzü
+================================================
 Bu dosya PlateDetection/ (plaka okuma) ve VestAndBaret/ (baret &
 yelek tespiti) klasörlerindeki hazır modelleri/pipeline'ları web üzerinden
 denemek için bir arayüz sağlar. Asıl tespit/OCR mantığına DOKUNULMAZ; bu
@@ -43,7 +43,7 @@ sys.path.insert(0, str(VEST_DIR))
 sys.path.insert(0, str(FIRE_DIR))
 sys.path.insert(0, str(MED_DIR))
 
-st.set_page_config(page_title="İyex Tespit Demo", layout="wide")
+st.set_page_config(page_title="YOLO Çoklu Tespit Platformu", layout="wide")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff",".webp",".avif"}
 VIDEO_EXTS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
@@ -965,7 +965,7 @@ def run_medical_video(video_path, izleyici, max_seconds, frame_ph, status_ph, ta
 
 # ═══════════════════════════════════════ ARAYÜZ ═══════════════════════════════════════
 
-st.title("İyex Tespit Demo")
+st.title("YOLO Çoklu Tespit Platformu")
 st.caption("Plaka okuma ve baret/yelek tespiti modellerini tarayıcıdan deneyin.")
 
 tab_plate, tab_vest, tab_fire, tab_med = st.tabs(

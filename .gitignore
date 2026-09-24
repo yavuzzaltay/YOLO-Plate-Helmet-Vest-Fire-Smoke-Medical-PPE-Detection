@@ -11,6 +11,10 @@ PlateDetection/.venv/
 **/__pycache__/
 **/*.cache
 
+# Eğitim/çalışma logları (geçici çıktılar, depoya girmez)
+*.log
+train_*_log.txt
+
 # Weights (YOLO models - too large for GitHub)
 **/*.pt
 

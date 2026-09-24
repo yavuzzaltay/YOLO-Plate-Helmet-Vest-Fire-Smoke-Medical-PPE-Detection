@@ -1,5 +1,5 @@
 ======================================================================
-İYEX — KURULUM REHBERİ (başka bir bilgisayarda çalıştırmak için)
+YOLO ÇOKLU TESPİT PLATFORMU — KURULUM REHBERİ (başka bir bilgisayarda çalıştırmak için)
 ======================================================================
 
 Bu proje 4 bağımsız tespit modülünü (Plaka, Baret&Yelek, Yangın&Duman,
@@ -78,10 +78,12 @@ depoda GERÇEKTEN bulunanlar ile EKSİK olanlar:
   MedicalPPE/MedicalPPE.pt                                       → depoda VAR (v1 model)
   FireAndSmoke/runs/detect/fire_smoke_yolo11-4/.../fire_smoke_yolo11-4.pt   → depoda VAR (eski nano deneme)
   FireAndSmoke/runs/detect/fire_smoke_yolo11s/.../fire_smoke_yolo11s.pt    → depoda VAR (eski, D-Fire'sız deneme)
-  FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/.../fire_smoke_yolo11s_dfire.pt
-                                                          → DEPODA YOK — ama kod bunu
-                                                            otomatik en iyi model sanıp
-                                                            seçmeye çalışacak konumda!
+  FireAndSmoke/fire_smoke_yolo11s_dfire.pt (KÖK dizinde, aktif model)
+                                                          → DEPODA YOK — ama kod
+                                                            bunu (kök dizini önce
+                                                            tarayarak) otomatik en
+                                                            iyi model sanıp seçmeye
+                                                            çalışacak konumda!
   VestAndBaret/VestAndBaret.pt                           → DEPODA YOK — bu modül
                                                             BAŞKA hiçbir dosyaya
                                                             bakmıyor, doğrudan bu
@@ -89,7 +91,9 @@ depoda GERÇEKTEN bulunanlar ile EKSİK olanlar:
 
 (Not: her modülün model dosyası artık kendi klasörünün/deneyinin adını
  taşıyor — genel geçer "best.pt" adı YOK; find_weights()/
- find_latest_best_weights()/initialize_model() bu isimlere göre arar.)
+ find_latest_best_weights()/initialize_model() bu isimlere göre arar.
+ FireAndSmoke'ta aktif model artık runs/detect altında değil, doğrudan
+ FireAndSmoke/ kök dizininde — diğer üç modülün deseniyle aynı.)
 
 SONUÇ: sadece "git clone" ile başka bir bilgisayara taşırsan:
   - 🦺 Baret & Yelek sekmesi FileNotFoundError ile PATLAR (VestAndBaret.pt yok).
@@ -99,7 +103,7 @@ SONUÇ: sadece "git clone" ile başka bir bilgisayara taşırsan:
     birini seçer, hata vermez — bu yüzden fark etmesi zor).
 
 BUNU ÇÖZMEK İÇİN: bu iki dosyayı KAYNAK BİLGİSAYARDAN elle kopyala:
-    FireAndSmoke/runs/detect/fire_smoke_yolo11s_dfire/weights/fire_smoke_yolo11s_dfire.pt
+    FireAndSmoke/fire_smoke_yolo11s_dfire.pt
     VestAndBaret/VestAndBaret.pt
 Aynı göreli yola (yukarıdaki gibi) yapıştır. İkisi de birkaç on MB.
 
@@ -130,7 +134,7 @@ GitHub'da, koda gömülen her şey herkese açık olur.
 6. ÇALIŞTIRMA
 ----------------------------------------------------------------------
 
-En kolay yol — proje kökünde calistir.bat'a çift tıkla, ya da:
+En kolay yol — proje kökünde scripts/run-windows.bat'a çift tıkla (Linux/macOS'ta: bash scripts/run.sh), ya da:
 
     PlateDetection\.venv\Scripts\python.exe -m streamlit run app.py
 
@@ -173,10 +177,11 @@ hızlıdır.
 ----------------------------------------------------------------------
 Dosya haritası (kurulumla ilgili)
 ----------------------------------------------------------------------
-  requirements.txt   → pip bağımlılık listesi (bu dosyayla birlikte)
-  calistir.bat        → arayüzü tek tıkla başlatan Windows script'i
-  PROJE_RAPORU.txt     → projenin tüm teknik anlatısı (kurulumdan sonra
-                         okumak için)
+  requirements.txt   → pip bağımlılık listesi (proje kökünde)
+  scripts/run-windows.bat → arayüzü tek tıkla başlatan Windows script'i
+  scripts/run.sh          → Linux/macOS için karşılığı
+  docs/proje-raporu.md    → projenin tüm teknik anlatısı (kurulumdan sonra
+                          okumak için)
   MedicalPPE/TEKNIK_RAPOR.md
   FireAndSmoke/TEKNIK_RAPOR.md
   VestAndBaret/TEKNIK_RAPOR.md

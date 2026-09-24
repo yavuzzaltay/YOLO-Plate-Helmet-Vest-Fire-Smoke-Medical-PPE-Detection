@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800" font-family="Inter, 'Segoe UI', Arial, sans-serif">
+  <rect width="1280" height="800" fill="#0e1117"/>
+  <!-- browser chrome -->
+  <rect x="0" y="0" width="1280" height="52" fill="#262730"/>
+  <circle cx="28" cy="26" r="8" fill="#ff5f57"/>
+  <circle cx="52" cy="26" r="8" fill="#febc2e"/>
+  <circle cx="76" cy="26" r="8" fill="#28c840"/>
+  <rect x="110" y="12" width="640" height="28" rx="14" fill="#0e1117"/>
+  <text x="130" y="31" font-size="15" fill="#9aa0aa">localhost:8501 — YOLO Çoklu Tespit Platformu</text>
+  <!-- title -->
+  <text x="60" y="110" font-size="34" font-weight="700" fill="#fafafa">YOLO Çoklu Tespit Platformu</text>
+  <text x="60" y="136" font-size="15" fill="#9aa0aa">Plaka okuma, baret/yelek, yangın/duman ve tıbbi PPE modellerini tarayıcıdan deneyin.</text>
+  <!-- tabs -->
+  <g font-size="16" font-weight="600">
+    <rect x="60" y="155" width="220" height="44" rx="8" fill="#ff4b4b"/>
+    <text x="80" y="183" fill="#ffffff">Plaka Tespiti</text>
+    <rect x="292" y="155" width="250" height="44" rx="8" fill="#262730"/>
+    <text x="312" y="183" fill="#e0e0e0">Baret &amp; Yelek</text>
+    <rect x="554" y="155" width="270" height="44" rx="8" fill="#262730"/>
+    <text x="574" y="183" fill="#e0e0e0">Yangın &amp; Duman</text>
+    <rect x="836" y="155" width="200" height="44" rx="8" fill="#262730"/>
+    <text x="856" y="183" fill="#e0e0e0">Tıbbi PPE</text>
+  </g>
+  <!-- metric cards -->
+  <g>
+    <rect x="60" y="215" width="200" height="86" rx="10" fill="#262730"/>
+    <text x="76" y="242" font-size="13" fill="#9aa0aa">Precision</text>
+    <text x="76" y="278" font-size="30" font-weight="700" fill="#28c840">%91,7</text>
+    <rect x="276" y="215" width="200" height="86" rx="10" fill="#262730"/>
+    <text x="292" y="242" font-size="13" fill="#9aa0aa">Recall</text>
+    <text x="292" y="278" font-size="30" font-weight="700" fill="#28c840">%85,7</text>
+    <rect x="492" y="215" width="200" height="86" rx="10" fill="#262730"/>
+    <text x="508" y="242" font-size="13" fill="#9aa0aa">F1</text>
+    <text x="508" y="278" font-size="30" font-weight="700" fill="#28c840">%88,6</text>
+    <rect x="708" y="215" width="200" height="86" rx="10" fill="#262730"/>
+    <text x="724" y="242" font-size="13" fill="#9aa0aa">mAP50</text>
+    <text x="724" y="278" font-size="30" font-weight="700" fill="#28c840">%86,1</text>
+    <rect x="924" y="215" width="200" height="86" rx="10" fill="#262730"/>
+    <text x="940" y="242" font-size="13" fill="#9aa0aa">mAP50-95</text>
+    <text x="940" y="278" font-size="30" font-weight="700" fill="#28c840">%66,7</text>
+  </g>
+  <text x="60" y="322" font-size="13" fill="#9aa0aa">Gerçek üretim pipeline'ı ile test setinde ölçüldü — “Metrikleri Hesapla” butonu, her sekmede canlı ölçüm yapar.</text>
+  <!-- main panels -->
+  <rect x="60" y="340" width="740" height="400" rx="10" fill="#1a1d24"/>
+  <!-- stylized street scene -->
+  <rect x="80" y="420" width="700" height="300" rx="6" fill="#23262e"/>
+  <rect x="80" y="600" width="700" height="120" rx="0" fill="#1b1e25"/>
+  <rect x="80" y="596" width="700" height="6" fill="#3a3f4a"/>
+  <!-- car body -->
+  <rect x="200" y="500" width="420" height="110" rx="18" fill="#31435c"/>
+  <rect x="280" y="460" width="260" height="70" rx="14" fill="#3b5170"/>
+  <rect x="300" y="472" width="90" height="46" rx="6" fill="#9fc1e3"/>
+  <rect x="400" y="472" width="120" height="46" rx="6" fill="#9fc1e3"/>
+  <circle cx="280" cy="610" r="34" fill="#14161b"/>
+  <circle cx="280" cy="610" r="15" fill="#6b7280"/>
+  <circle cx="540" cy="610" r="34" fill="#14161b"/>
+  <circle cx="540" cy="610" r="15" fill="#6b7280"/>
+  <!-- plate detection box -->
+  <rect x="368" y="556" width="112" height="30" rx="3" fill="none" stroke="#00e5cc" stroke-width="3"/>
+  <rect x="368" y="532" width="150" height="22" rx="4" fill="#00e5cc"/>
+  <text x="376" y="548" font-size="14" font-weight="700" fill="#0e1117">34 ABC 123</text>
+  <text x="80" y="400" font-size="16" font-weight="600" fill="#fafafa">Canlı tespit — iz#3 çözüldü, CSV'ye yazıldı</text>
+  <!-- right panel: results table -->
+  <rect x="820" y="340" width="400" height="400" rx="10" fill="#1a1d24"/>
+  <text x="844" y="378" font-size="16" font-weight="600" fill="#fafafa">Sonuçlar</text>
+  <g font-size="14" fill="#e0e0e0">
+    <rect x="844" y="394" width="352" height="40" rx="6" fill="#262730"/>
+    <text x="856" y="420" fill="#fafafa">34 ABC 123</text>
+    <text x="1060" y="420" fill="#28c840">%94,2 ✓</text>
+    <rect x="844" y="442" width="352" height="40" rx="6" fill="#262730"/>
+    <text x="856" y="468" fill="#fafafa">06 DEF 456</text>
+    <text x="1060" y="468" fill="#28c840">%91,5 ✓</text>
+    <rect x="844" y="490" width="352" height="40" rx="6" fill="#262730"/>
+    <text x="856" y="516" fill="#fafafa">35 GHI 789</text>
+    <text x="1060" y="516" fill="#febc2e">%72,1 ✗</text>
+  </g>
+  <rect x="844" y="560" width="352" height="66" rx="8" fill="#123324"/>
+  <text x="858" y="586" font-size="14" fill="#28c840">plaka_video_log.csv güncellendi</text>
+  <text x="858" y="608" font-size="13" fill="#9aa0aa">2 farklı plaka • kanıt fotoğrafları kaydedildi</text>
+  <text x="844" y="680" font-size="13" fill="#9aa0aa">Video: 12,4 sn • aktif iz: 1 • işlem hızı: 9,6 FPS</text>
+  <text x="60" y="772" font-size="12" fill="#6b7280">Temsili arayüz şeması — gerçek ekran görüntüleri ve model çıktıları aşağıda (docs/screenshots).</text>
+</svg>

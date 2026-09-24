@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from roboflow import Roboflow
 from ultralytics import YOLO
 
@@ -50,12 +51,16 @@ class PlateModelFineTuner:
 
 # --- ANA ÇALIŞTIRICI (ENTRY POINT) ---
 if __name__ == "__main__":
-    # 1. Kendi Roboflow API anahtarını buraya yapıştır
-    # (Roboflow sitesinde Settings -> Roboflow API kısmından alabilirsin)
-    ROBOFLOW_API_KEY = "5ev3CyoR15ytn0okpkFV"
-    
-    # 2. Üzerine eğiteceğin mevcut modelinin yolu
-    MY_BEST_MODEL_PATH = r"C:\Users\Yavuz Altay\Desktop\İyex\PlateDetection\PlateDetection.pt"
+    # 1. Roboflow API anahtarını ortam değişkeninden al
+    # (Roboflow sitesinde Settings -> Roboflow API kısmından alıp
+    #  PowerShell'de "$env:ROBOFLOW_API_KEY = ..." ile tanımlayabilirsin.
+    #  Anahtarı ASLA koda gömme — bu depo herkese açık.)
+    ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY", "")
+    if not ROBOFLOW_API_KEY:
+        raise SystemExit("[HATA] ROBOFLOW_API_KEY ortam değişkeni tanımlı değil.")
+
+    # 2. Üzerine eğiteceğin mevcut modelin yolu (proje köküne göre göreceli)
+    MY_BEST_MODEL_PATH = str(Path(__file__).resolve().parent / "PlateDetection.pt")
     
     try:
         # --- VERİ SETİ İNDİRME AŞAMASI ---

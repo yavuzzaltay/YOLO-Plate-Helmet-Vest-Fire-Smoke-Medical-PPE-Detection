@@ -34,7 +34,7 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent
 # DİKKAT — RAW_DIR proje klasörünün İÇİNDE DEĞİL, kısa bir yolda (C:\ppe_raw):
 # Roboflow'un bazı projelerindeki dosya adları ~200 karakter olabiliyor;
-# bu proje klasörünün derin/Unicode/boşluklu yoluyla ("...\İyex\MedicalPPE\
+# bu proje klasörünün derin/Unicode/boşluklu yoluyla ("...\<proje-kökü>\MedicalPPE\
 # raw_datasets\dsX\valid\images\...") birleşince Windows'un 260 karakterlik
 # MAX_PATH sınırını aşıp "FileNotFoundError" ile patlıyor (kayıt defteri
 # değişikliği gerektirmeden çözüm: yolu kısalt). Birleştirme adımında
@@ -277,7 +277,7 @@ def merge_all() -> None:
             # DİKKAT: orijinal Roboflow dosya adları KISALTILIYOR (ds1_00001
             # gibi sıralı adlarla). Nedeni sadece kozmetik değil: bazı
             # Roboflow projelerinde dosya adı ~200 karakter oluyor; bu proje
-            # klasörünün derin yoluyla ("...\İyex\MedicalPPE\dataset\train\
+            # klasörünün derin yoluyla ("...\<proje-kökü>\MedicalPPE\dataset\train\
             # images\...") birleşince Windows'un 260 karakterlik MAX_PATH
             # sınırı yine aşılırdı (RAW_DIR'i kısaltmak burada işe yaramaz,
             # DATASET_DIR proje içinde kalmalı). Kısa/sıralı ad hem sınırı

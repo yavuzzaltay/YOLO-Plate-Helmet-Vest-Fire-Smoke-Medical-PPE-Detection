@@ -55,21 +55,35 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def find_latest_best_weights():
-    # Sadece FireAndSmoke/runs/detect altindaki egitimlere bakar (baska
-    # projelerdeki agirlik dosyalarina karismaz). Her deneme klasorundeki
-    # "best" agirligi kendi deney adiyla yeniden adlandirildi (ornek:
+    # Oncelik 1: FireAndSmoke/ KOKUNE elle birakilan, kullanima hazir
+    # agirlik (MedicalPPE/PlateDetection/VestAndBaret'teki "direkt dosya"
+    # deseniyle aynı). Deney adiyla adlandirilir (ornek:
     # fire_smoke_yolo11s_dfire.pt) — "best.pt" gibi jenerik bir isim
-    # istenmedigi icin. "last.pt" (her epoch sonu kaydedilen, henuz en
-    # iyi olmayan agirlik) HARIC tutulur; kalanlardan en son degistirilen
-    # (en guncel egitimden kalan) otomatik secilir. Bu desen, ileride
-    # yeniden adlandirilmamis TAZE bir Ultralytics ciktisini (hala
-    # "best.pt" adinda) da sorunsuz yakalar.
+    # istenmedigi icin.
+    #
+    # PRETRAINED_BASE_NAMES: train.py'nin FINE-TUNE BASLANGIC noktasi
+    # olarak indirdigi ON-EGITIMLI (henuz bizim verimizle egitilmemis)
+    # COCO agirliklari. Bunlar da FireAndSmoke/ kokunde .pt olarak durur;
+    # haric tutulmazsa "en son degisen .pt" mantigi bunlari YANLISLIKLA
+    # egitim SONUCU sanabilir (ornegin yeni bir base model indirilirse
+    # mtime'i en yeni olur).
+    PRETRAINED_BASE_NAMES = {"yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"}
+    direct_candidates = [p for p in BASE_DIR.glob("*.pt") if p.name not in PRETRAINED_BASE_NAMES]
+    if direct_candidates:
+        return str(max(direct_candidates, key=lambda p: p.stat().st_mtime))
+
+    # Oncelik 2: FireAndSmoke/runs/detect altindaki egitim denemeleri
+    # (baska projelerdeki agirlik dosyalarina karismaz). "last.pt" (her
+    # epoch sonu kaydedilen, henuz en iyi olmayan agirlik) HARIC tutulur;
+    # kalanlardan en son degistirilen (en guncel egitimden kalan)
+    # otomatik secilir. Bu desen, ileride yeniden adlandirilmamis TAZE
+    # bir Ultralytics ciktisini (hala "best.pt" adinda) da sorunsuz yakalar.
     runs_dir = BASE_DIR / "runs" / "detect"
 
     candidates = [p for p in runs_dir.glob("*/weights/*.pt") if p.name != "last.pt"]
     if not candidates:
         raise FileNotFoundError(
-            f"{runs_dir} altinda hicbir 'best.pt' bulunamadi. Once train.py ile "
+            f"{BASE_DIR} altinda hicbir egitilmis agirlik bulunamadi. Once train.py ile "
             f"bir egitim tamamlanmis olmali."
         )
 

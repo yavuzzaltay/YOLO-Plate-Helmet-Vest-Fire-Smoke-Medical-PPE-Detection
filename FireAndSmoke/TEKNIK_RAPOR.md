@@ -8,13 +8,15 @@ tarihçe için kök dizindeki `PROJE_RAPORU.txt` (4. bölüm) ve
 ## 1. Model
 
 - Mimari: **YOLO11s** (Ultralytics), 2 sınıf (`fire`, `smoke`).
-- Aktif ağırlık: `runs/detect/fire_smoke_yolo11s_dfire/weights/fire_smoke_yolo11s_dfire.pt`
-  (`find_latest_best_weights()` bu klasördeki en son değiştirilen ağırlık
-  dosyasını otomatik seçer, `last.pt` hariç — birden fazla eğitim denemesi
+- Aktif ağırlık: `FireAndSmoke/fire_smoke_yolo11s_dfire.pt` (KÖK dizinde,
+  diğer üç modülün "elle bırakılan hazır model" deseniyle aynı).
+  `find_latest_best_weights()` önce kök dizindeki .pt dosyalarına bakar
+  (ön-eğitimli COCO ağırlıkları `yolo11n.pt`/`yolo11s.pt` hariç tutularak),
+  bulamazsa `runs/detect/*/weights/*.pt` altındaki en son değiştirilen
+  ağırlığa düşer (`last.pt` hariç) — birden fazla eski eğitim denemesi
   (`fire_smoke_yolo11-4` nano taban çizgisi, `fire_smoke_yolo11s`
-  D-Fire'sız ilk small deneme) diskte tutulur, her biri kendi deney
-  adıyla adlandırılmış "best" ağırlığını taşır; kod her zaman en
-  yeniyi kullanır).
+  D-Fire'sız ilk small deneme) hâlâ o klasörde tutulur, ama artık
+  kullanılmıyorlar.
 - **nano → small geçişi**: ilk deneme (yolo11n, 50 epoch) recall'ü
   0.52'de kaldı — nano'nun ~2.6M parametresi, duman gibi şekilsiz/yarı
   saydam nesnelerde kapasite sınırına takılıyordu. yolo11s (~9.4M
@@ -133,9 +135,10 @@ isabetli; video gibi sürekli bir akış olmadığı için bu maliyetin
 - Yerel `prepare_dataset.py` D-Fire'ı içermiyor (yalnızca Kaggle
   tarafında birleştiriliyor); yerelde yeniden eğitim yapılırsa D-Fire
   ayrıca indirilip eklenmeli.
-- Diskte üç farklı eğitim denemesi (`fire_smoke_yolo11-4/`,
+- Diskte üç farklı eğitim denemesinin çıktısı (`runs/detect/fire_smoke_yolo11-4/`,
   `fire_smoke_yolo11s/`, `fire_smoke_yolo11s_dfire/`) birikmiş durumda;
-  yalnızca en yenisi (`_dfire`) kullanılıyor, eskiler temizlenebilir.
+  aktif model (`fire_smoke_yolo11s_dfire.pt`) artık kök dizine taşındı,
+  `runs/` altındakiler sadece arşiv — temizlenebilir.
 
 ## Dosya haritası
 
@@ -146,5 +149,6 @@ isabetli; video gibi sürekli bir akış olmadığı için bu maliyetin
 | `train.py` | `merged_dataset/` üzerinde YOLO11s eğitimi (yerel). |
 | `train_kaggle.py` | Kaggle'da D-Fire dahil genişletilmiş eğitim. |
 | `evaluate.py` | En son ağırlığı test setinde ölçer, eşik önerisi üretir. |
-| `runs/detect/*/weights/*.pt` | Eğitim denemeleri, her biri kendi deney adıyla (aktif: `fire_smoke_yolo11s_dfire.pt`). |
+| `fire_smoke_yolo11s_dfire.pt` | **Aktif model** (kök dizinde). |
+| `runs/detect/*/weights/*.pt` | Eski eğitim denemelerinin arşivi (artık kullanılmıyor). |
 | `YanginKayitlari/`, `yangin_olay_log.csv` | Video hattının kanıt fotoğrafları ve olay kaydı. |

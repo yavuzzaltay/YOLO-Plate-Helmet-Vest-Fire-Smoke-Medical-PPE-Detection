@@ -1,4 +1,4 @@
-# İyex — Python bağımlılıkları
+# YOLO Çoklu Tespit Platformu — Python bağımlılıkları
 #
 # torch/torchvision/torchaudio NVIDIA GPU (CUDA 12.6 uyumlu) içindir.
 # Kurulum sırası ve GPU'suz (CPU) alternatif için KURULUM.txt'ye bak —

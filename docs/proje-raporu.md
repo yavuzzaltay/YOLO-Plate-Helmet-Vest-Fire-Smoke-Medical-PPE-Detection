@@ -1,9 +1,9 @@
 ======================================================================
-İYEX TESPİT PLATFORMU — PROJE RAPORU
+YOLO ÇOKLU TESPİT PLATFORMU — PROJE RAPORU
 Hazırlanma tarihi: 2026-07-17
 ======================================================================
 
-Bu belge, İyex projesinin tamamını (ne yapıldığını, neyin nasıl
+Bu belge, projenin tamamını (ne yapıldığını, neyin nasıl
 çalıştığını, hangi teknolojilerin kullanıldığını ve şu anki durumu)
 tek bir yerden anlatmak için hazırlandı. Proje köke tek bir Streamlit
 uygulamasında (app.py) birleşen DÖRT bağımsız görüntü işleme modülünden
@@ -208,12 +208,14 @@ ile birleştirilmiş hali:
   YENİDEN YAZILIYOR — iki farklı veri setinin id'lerini üst üste
   koyarsak çakışma riski var, isim bazlı eşleme bunu önlüyor).
 
-DENENEN 3 EĞİTİM (runs/detect altında):
+DENENEN 3 EĞİTİM (o zaman runs/detect altındaydı):
   fire_smoke_yolo11-4    — ilk deneme (nano model civarı)
   fire_smoke_yolo11s     — yolo11 small
-  fire_smoke_yolo11s_dfire — ŞU AN AKTİF ("D-Fire-less" varyant,
-                             en son değiştirilen dosya olduğu için
-                             find_latest_best_weights() bunu seçiyor)
+  fire_smoke_yolo11s_dfire — ŞU AN AKTİF (D-Fire ile eğitilmiş varyant)
+(2026-07-24'te: aktif model FireAndSmoke/fire_smoke_yolo11s_dfire.pt
+ olarak KÖK dizine taşındı — diğer üç modülün "elle bırakılan hazır
+ model" deseniyle aynı; find_latest_best_weights() artık önce kök
+ dizine bakıyor, eskiler runs/detect altında arşiv olarak kalıyor.)
 
 EŞİKLER (F1-Confidence zirvesinden kalibre — göz kararı DEĞİL):
   fire  eşiği = 0.37   (F1 zirvesi ~0.614)
