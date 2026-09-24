@@ -5,123 +5,119 @@
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b)](https://streamlit.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Staj kapsamında geliştirilmiş, **4 bağımsız YOLO tabanlı görüntü işleme modülünü tek bir Streamlit arayüzünde birleştiren** gerçek zamanlı tespit ve izleme platformu: **plaka okuma (OCR)**, **baret & yelek denetimi**, **yangın & duman izleme** ve **tıbbi PPE (KKD) uyum denetimi**.
+A real-time detection and monitoring platform built during an internship, combining **4 independent YOLO-based vision modules in a single Streamlit interface**: **license plate recognition (OCR)**, **hardhat & safety-vest inspection**, **fire & smoke monitoring**, and **medical PPE compliance checking**.
 
-Her modül fotoğraf, video ve canlı telefon kamerası (IP Webcam) ile çalışır; tespitler CSV'ye yazılır, kanıt fotoğraflarıyla arşivlenir. Arayüzdeki **"Metrikleri Hesapla"** butonu her modelin doğruluk metriklerini test setinde canlı ölçer — sabit, ezber değer yok.
+Every module works with photos, video files, and a live phone camera (IP Webcam); detections are written to CSV and archived with evidence snapshots. The **"Compute Metrics"** button in the UI measures each model's accuracy live on its test set — no hardcoded numbers.
 
-![Ana ekran — plaka sekmesi](docs/screenshots/app-plate.png)
+![Main screen — plate tab](docs/screenshots/app-plate.png)
 
-## Çalışırken — gerçek ekran görüntüleri
+## In action — real screenshots
 
-Aşağıdaki görüntülerin tamamı sistem çalışırken alındı: önce uygulamanın gerçek arayüzü, ardından her modelin gerçek bir örnek üzerindeki anotasyonlu çıktısı.
+Everything below was captured while the system was running: first the actual application UI, then each model's annotated output on a real sample.
 
-### Plaka tespiti + OCR
+### License plate detection + OCR
 
-| Arayüz (örnek galeri) | Model çıktısı (`araba1.jpg` → **34 N 5953**, %96,2) |
+| Interface (sample gallery) | Model output (`araba1.jpg` → **34 N 5953**, 96.2%) |
 |---|---|
-| ![Plaka arayüzü](docs/screenshots/app-plate.png) | ![Plaka tespiti](docs/screenshots/det-plate.jpg) |
+| ![Plate UI](docs/screenshots/app-plate.png) | ![Plate detection](docs/screenshots/det-plate.jpg) |
 
-Üretim hattı tek karede 3 ölçekte tarama yapar, kutuları tekilleştirir, eğikliği düzeltir, mavi bant/turuncu sticker temizler ve 5 görüntü varyantında OCR oylaması yapar (tam log çıktısı yukarıdaki gibi konsolda görülür).
+The production pipeline scans each frame at 3 scales, merges boxes, corrects skew, cleans the blue TR band / orange stickers, and votes across 5 image variants in OCR.
 
-### Baret & Yelek
+### Hardhat & Safety Vest
 
-| Arayüz (ihlal kayıtlarıyla) | Model çıktısı (kişi + `no-safety-vest` tespiti) |
+| Interface (with violation log) | Model output (person + `no-safety-vest` detections) |
 |---|---|
-| ![Baret-yelek arayüzü](docs/screenshots/app-vest.png) | ![Baret-yelek tespiti](docs/screenshots/det-vest.jpg) |
+| ![Vest UI](docs/screenshots/app-vest.png) | ![Vest detection](docs/screenshots/det-vest.jpg) |
 
-### Yangın & Duman
+### Fire & Smoke
 
-| Arayüz (sınıf bazlı eşiklerle) | Model çıktısı (`fire` 0,72 + `smoke` 0,41) |
+| Interface (per-class thresholds) | Model output (`fire` 0.72 + `smoke` 0.41) |
 |---|---|
-| ![Yangın arayüzü](docs/screenshots/app-fire.png) | ![Yangın tespiti](docs/screenshots/det-fire.jpg) |
+| ![Fire UI](docs/screenshots/app-fire.png) | ![Fire detection](docs/screenshots/det-fire.jpg) |
 
-Video tarafında bu tespitler tek başına alarm üretmez — YOLO track + N-of-M zamansal onaydan (fire 4/8, smoke 5/10) geçen olaylar kanıt fotoğrafıyla kaydedilir:
+On video these detections alone never raise an alarm — events are confirmed through YOLO tracking + N-of-M temporal voting (fire 4/8, smoke 5/10) and recorded with evidence snapshots.
 
-| Yangın — onaylı olay kanıtı | Duman — onaylı olay kanıtı |
+### Medical PPE
+
+| Interface (sample gallery) | Model output (`person`, `surgical-cap`, `mask`, `gown` — no violation) |
 |---|---|
-| ![Yangın kanıt karesi](docs/screenshots/evidence-fire.jpg) | ![Duman kanıt karesi](docs/screenshots/evidence-smoke.jpg) |
+| ![Medical PPE UI](docs/screenshots/app-medical.png) | ![Medical PPE inspection](docs/screenshots/det-medical.jpg) |
 
-### Tıbbi PPE
+## Why this is a solid project
 
-| Arayüz (örnek galeri) | Model çıktısı (`kişi`, `bone`, `maske`, `önlük` — ihlal yok) |
-|---|---|
-| ![Tıbbi PPE arayüzü](docs/screenshots/app-medical.png) | ![Tıbbi PPE denetimi](docs/screenshots/det-medical.jpg) |
+- **Measurement culture:** Thresholds are calibrated from the peaks of F1-Confidence curves, not gut feeling. Plate and medical-PPE metrics are measured by running the **actual production pipeline**, not plain `model.val()`.
+- **Temporal reasoning:** On video, YOLO tracking + N-of-M confirmation means single-frame glints never become alarms; decisions are made on accumulated evidence.
+- **Rejected-by-measurement ideas:** A P2 detection head, 3×3 tiling, and full-frame upscaling were all tried and rolled back when the test set showed no benefit — reports under `docs/`.
+- **14,375-image training set** assembled from multiple sources; weak classes got 10–15× more data with zero test-set leakage.
 
-## Neden iyi bir proje?
+## Modules and measured results
 
-- **Gerçek ölçüm kültürü:** Eşikler "göz kararı" değil, F1-Confidence eğrilerinin zirvesinden kalibre edildi. Plaka ve tıbbi PPE metrikleri düz `model.val()` ile değil, **üretimdeki gerçek pipeline** çalıştırılarak ölçüldü.
-- **Zamansal akıl:** Video tarafında YOLO track + N-of-M onayı sayesinde tek karelik parlamalar alarm üretmiyor; kararlar biriken kanıtla veriliyor.
-- **Ölçülerek reddedilen fikirler:** P2 tespit başlığı, 3×3 dilimleme, tam kareyi büyütme gibi yollar denendi, test setinde fayda göstermeyince geri alındı — raporları `docs/` altında.
-- **14.375 görüntülük eğitim seti** birleştirildi; zayıf sınıflara 10-15 kat ek veri sağlandı, test seti sızıntısı olmadan.
-
-## Modüller ve ölçülmüş sonuçlar
-
-| Modül | Klasör | Ne yapar | Test sonucu |
+| Module | Folder | What it does | Test result |
 |---|---|---|---|
-| Plaka Tespiti + OCR | `PlateDetection/` | Çok geçişli YOLO tespiti, CLAHE + EasyOCR okuma, Türk plaka doğrulaması, videoda iz takibi + karakter oylaması | P %91,7 · R %85,7 · **mAP50 %86,1** (gerçek hat, 391 görüntü) |
-| Baret & Yelek | `VestAndBaret/` | hardhat / no-hardhat / safety-vest / no-safety-vest / person — iş güvenliği ihlal tespiti | P %92,6 · R %91,0 · **mAP50 %94,6** (eğitim-doğrulama) |
-| Yangın & Duman | `FireAndSmoke/` | Track + N-of-M zamansal onay (fire 4/8, smoke 5/10), kanıt fotoğrafı + CSV | P %72,8 · R %53,0 · **mAP50 %61,1** (351 görüntü) |
-| Tıbbi PPE | `MedicalPPE/` | 14 sınıf KKD denetimi, TTA + 2×2 dilimli tespit, kişi-ekipman eşleştirme | P %76,3 · R %80,3 · **mAP50 %80,0** (535 görüntü) |
+| Plate Detection + OCR | `PlateDetection/` | Multi-pass YOLO detection, CLAHE + EasyOCR reading, Turkish plate validation, track + character voting on video | P 91.7% · R 85.7% · **mAP50 86.1%** (real pipeline, 391 images) |
+| Hardhat & Vest | `VestAndBaret/` | hardhat / no-hardhat / safety-vest / no-safety-vest / person — workplace safety violations | P 92.6% · R 91.0 · **mAP50 94.6%** (train-val) |
+| Fire & Smoke | `FireAndSmoke/` | Track + N-of-M temporal confirmation (fire 4/8, smoke 5/10), evidence photo + CSV | P 72.8% · R 53.0% · **mAP50 61.1%** (351 images) |
+| Medical PPE | `MedicalPPE/` | 14-class PPE inspection, TTA + 2×2 tiled detection, person-equipment matching | P 76.3% · R 80.3% · **mAP50 80.0%** (535 images) |
 
-## Mimari — 4 bağımsız modül, tek arayüz
+## Architecture — 4 independent modules, one interface
 
-Hiçbir modül diğerini import etmez; her biri komut satırından tek başına da çalışır. Video/canlı izlemede ortak katmanlar: YOLO track (kalıcı iz kimliği) → sınıf bazlı güven eşiği (F1 zirvesinden kalibre) → N-of-M zamansal filtre → onay anında kanıt kaydı (fotoğraf + CSV, alarm yok). Fotoğraf modunda TTA her zaman açıktır.
+No module imports another; each also runs standalone from the command line. Shared video/live layers: YOLO track (persistent IDs) → per-class confidence threshold (calibrated from F1 peaks) → N-of-M temporal filter → evidence recording on confirmation (photo + CSV, no alarms). TTA is always on for photos.
 
-## Hızlı başlangıç
+## Quick start
 
 ```bash
-# Windows — tek tık:
+# Windows — one click:
 scripts\run-windows.bat
 
 # Linux / macOS:
 bash scripts/run.sh
 ```
 
-Detaylı kurulum (venv, GPU/CPU bağımlılıkları, eksik model dosyalarının tamamlanması): **[docs/kurulum.md](docs/kurulum.md)**
+Full setup (venv, GPU/CPU dependencies, completing the missing model files): **[docs/kurulum.md](docs/kurulum.md)** (Turkish).
 
-> Not: Büyük model dosyaları (`.pt`) depoda değildir (bkz. `.gitignore`). Hangi dosyayı nereye koyacağınız `docs/kurulum.md` §4'te yazıyor.
+> Note: Large model files (`.pt`) are not in the repo (see `.gitignore`). `docs/kurulum.md` §4 says which file goes where.
 
-## Proje yapısı
+## Project structure
 
 ```
-app.py                  → 4 sekmeli Streamlit arayüzü (tek giriş noktası)
-requirements.txt        → tek venv ile kurulan tüm bağımlılıklar
-PlateDetection/         → plaka tespiti + OCR (fotoğraf ve video hattı)
-VestAndBaret/           → baret & yelek modeli ve ihlal logu
-FireAndSmoke/           → yangın/duman izleyici, eğitim ve değerlendirme scriptleri
-MedicalPPE/             → tıbbi PPE izleyici, veri birleştirme, eğitim scriptleri
-scripts/                → Windows (.bat) ve Linux/macOS (.sh) başlatıcılar
+app.py                  → 4-tab Streamlit interface (single entry point)
+requirements.txt        → all dependencies, installed into one venv
+PlateDetection/         → plate detection + OCR (photo and video pipelines)
+VestAndBaret/           → hardhat & vest model and violation log
+FireAndSmoke/           → fire/smoke monitor, training and evaluation scripts
+MedicalPPE/             → medical PPE monitor, dataset merging, training scripts
+scripts/                → Windows (.bat) and Linux/macOS (.sh) launchers
 docs/
-  kurulum.md            → başka bilgisayarda çalıştırma rehberi
-  proje-raporu.md       → tüm projenin teknik anlatısı
-  plaka-video-mantigi.md→ video plaka takibinin adım adım açıklaması
-  plaka-pipeline.md     → plaka fotoğraf hattı detayları
-  screenshots/          → arayüz şemaları + gerçek sistem çıktıları
+  kurulum.md            → setup guide for another machine (Turkish)
+  proje-raporu.md       → full technical narrative (Turkish)
+  plaka-video-mantigi.md→ video plate tracking, step by step (Turkish)
+  plaka-pipeline.md     → plate photo pipeline details (Turkish)
+  screenshots/          → interface captures + real system outputs
 ```
 
-Her modülün kendi teknik raporu kendi klasöründedir (`TEKNIK_RAPOR.md` / `README.md`).
+Each module keeps its own technical report in its folder (`TEKNIK_RAPOR.md` / `README.md`, Turkish).
 
-## Ortak mimari (video/canlı izleme)
+## Shared pipeline (video/live monitoring)
 
-1. **YOLO track** — nesnelere kareler arası kalıcı kimlik.
-2. **Sınıf bazlı güven eşiği** — her sınıfın eşiği kendi F1 zirvesinden.
-3. **N-of-M zamansal filtre** — iz, son M karenin N'inde görüldüyse onaylanır.
-4. **Kanıt kaydı** — onay anında anotasyonlu fotoğraf + CSV satırı (alarm/bildirim yok — sistem izleme ve kayıt için tasarlandı).
+1. **YOLO track** — persistent IDs across frames.
+2. **Per-class confidence threshold** — each class threshold from its own F1 peak.
+3. **N-of-M temporal filter** — a track is confirmed if seen in N of the last M frames.
+4. **Evidence recording** — annotated photo + CSV row at confirmation (no alarms/notifications — the system is designed for monitoring and recording).
 
-Fotoğraf modunda TTA (test zamanında veri artırma) her zaman açıktır; tıbbi PPE'de buna %20 örtüşmeli 2×2 dilimli tespit eklenir.
+TTA (test-time augmentation) is always on in photo mode; medical PPE adds 2×2 tiled detection with 20% overlap.
 
-## Teknolojiler
+## Tech stack
 
 Python 3.13 · Ultralytics YOLO11 · PyTorch (CUDA) · EasyOCR · OpenCV · Streamlit · pandas · NumPy · Roboflow
 
-## Veri setleri ve teşekkür
+## Datasets & credits
 
-- Plaka: `guler-kandeger/plate-detection-vh2rk` (Roboflow, CC BY 4.0)
-- Yangın/duman: iki Roboflow kaynağının sınıf-eşlemeli birleşimi (detay: `FireAndSmoke/prepare_dataset.py`)
-- Tıbbi PPE: 5 Roboflow kaynağının birleşimi, 14 ortak sınıf (detay: `MedicalPPE/prepare_dataset.py`)
+- Plates: `guler-kandeger/plate-detection-vh2rk` (Roboflow, CC BY 4.0)
+- Fire/smoke: class-mapped merge of two Roboflow sources (see `FireAndSmoke/prepare_dataset.py`)
+- Medical PPE: merge of 5 Roboflow sources into 14 shared classes (see `MedicalPPE/prepare_dataset.py`)
 
-Veri seti sahiplerine ve açık kaynak topluluğuna teşekkürler.
+Thanks to the dataset owners and the open-source community.
 
-## Lisans
+## License
 
-MIT — bkz. [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
